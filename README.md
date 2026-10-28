@@ -1,0 +1,119 @@
+# Work Assistant / 本地工作助理
+
+复用已安装的 DeepSeek Harness、Claude Code 和 Codex，把任务、执行记录、证据、更正和日报留在本机。Python 3.9+，运行时只有标准库，不需要 pip。MIT 开源。
+
+Local-first personal assistant with two-stage routing, durable task history, attributed evidence, offline reports, and explicitly authorized Feishu publication.
+
+## 五分钟无凭证离线运行
+
+在仓库根目录执行：
+
+```sh
+python3 -m work_assistant demo --output out/demo
+python3 -m unittest discover -s tests -v
+python3 -m compileall -q work_assistant
+```
+
+demo 输出 JSON 内的 `report_path` 指向报告目录。用浏览器打开其中 `index.html`，查看五部分 Daily Sync、源数据柱图与证据明细；`card-preview.html` 是飞书原生文字卡片的本地预览。全部文件自包含，无 CDN。demo 的模型和观测均是确定性合成 fixture，不联网、不验证真实提供商、不发消息。重复使用完整 demo 目录会返回原结果；不完整目录请换一个输出位置。
+
+交付文件：`index.html`、`daily-sync.md`、`evidence.html`、`evidence.json`、`card.json`、`document.json`、`card-preview.html`。在不同目录新跑 demo，报告内容哈希相同。状态数据库、工作区和源观测留在输出目录，不提交 Git。
+
+从源码路径只需要 Python 3.9+：克隆本仓库、进入目录，直接执行上述 `python3 -m work_assistant`，不需要虚拟环境、模型凭证或第三方包。
+
+正常安装路径可在隔离虚拟环境中执行：
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install .
+.venv/bin/wa demo --output out/installed-demo
+```
+
+安装过程需要 setuptools 构建工具；安装后的运行时仍无第三方依赖。开发者可改用 `pip install -e .`。源码路径在断网机器可直接运行，安装路径是否需联网取决于本机已有构建工具。
+
+提供商均通过已有本机 CLI 选择使用，demo、证据、报告、dry-run 均不需要安装任何模型 CLI。DSH 可选：缺失/不可运行时记录原因并升级到 Codex GPT planner；要在没有 DSH 时使用真实 route，需要已安装并登录的 Codex。Claude 是可选执行器；只安装 Codex 时可固定任务 `--provider codex` 执行，但独立的相反提供商 review 需要 Claude。DSH+Claude 可处理直接路由给 Claude 的任务；需要 GPT 升级而 Codex 不可用时会诚实进入 needs_user。Paseo 完全可选，不是 Python 包依赖，也不需要其 CLI。
+
+## 配置和任务
+
+```sh
+python3 -m work_assistant init
+python3 -m work_assistant doctor --json
+python3 -m work_assistant project add my-project --workspace .
+python3 -m work_assistant project list
+python3 -m work_assistant task add my-project '只读检查 README 与当前实现的一致性'
+python3 -m work_assistant task list --project my-project
+```
+
+复制输出中的 task ID，依次调用：
+
+```sh
+python3 -m work_assistant route TASK_ID
+python3 -m work_assistant run TASK_ID
+python3 -m work_assistant review TASK_ID
+python3 -m work_assistant task show TASK_ID
+python3 -m work_assistant run TASK_ID --followup '再检查刚才结果中的一个具体问题'
+```
+
+把 `TASK_ID` 替换为实际 ID。`route` 仅分类，DSH 超时、报错、低置信度、复杂任务、无效 JSON 或调用工具时最多升级一次到 Codex planner；planner 失败进入 needs_user。有效 planner 可执行复杂任务，不能扩大用户授权。默认执行器建议架构/审查交 Claude、实现交 Codex。任务可用 `--provider codex|claude_code` 固定执行器，也仍受项目 grants 约束。
+
+要授权一个独立可写项目，创建时显式给出两个 grant，任务也要声明写 intent：
+
+```sh
+python3 -m work_assistant project add writable-project --workspace . --allow read --allow write_workspace
+python3 -m work_assistant task add writable-project '在工作区添加合成示例文件' --intent write_workspace
+```
+
+编码进程必须有终态成功才标记 completed。写任务完成时仍未 verified；`review` 用相反提供商以只读权限检查实际工作区、结果和受锁保护的 git diff，保留 host git 观测与模型判断。只有结构化 pass 才设置 independently reviewed；这不是科学复现证明。进程仅启动、exit=0 报错、权限拒绝、没有最终结果都不算成功。CLI 的错误、failed、needs_user、unknown 返回 2，中断返回 130。
+
+配置默认 `config.local.json`，状态默认 `.wa/`，均被忽略。`--config PATH` 放在子命令之前。所有配置相对路径以配置文件所在目录为基准，支持 `~`；`project --workspace` 同样遵循该规则。证据命令中的源路径相对当前工作目录。参考 [合成配置](examples/config.example.json)。可配置每个提供商的 argv 数组、env、timeout、model，Codex 的 planner_effort/executor effort；不拼 shell，不自动切账号。显式本地 `CODEX_HOME` 可绑定已登录账号，仓库不包含个人路径或账号设置。
+
+`doctor` 检测安装与本机 help 能力，不测试登录、不消费模型。macOS 自动发现标准 Applications 下的 DSH。实际协议为 DSH headless JSON、CC print JSON、Codex exec JSONL；实现依据本机 help，详见 [设计规范](PLAN.md)。DSH 分类设置 `DSH_PERMISSION_MODE=read-only`，没有向旧版本传不存在的权限 flags。具体登录/profile overlay 由本机用户维护，不打印完整配置。真实 DSH 的事件格式和认证需安装环境冒烟确认；适配器拒绝缺失 terminal success 的输出。未测 live 时不能将 demo 当作 live 验证。
+
+## 证据、更正与报告
+
+```sh
+python3 -m work_assistant evidence add my-project examples/sample-observation.json --scope 'synthetic local example' --origin 'operator fixture'
+python3 -m work_assistant claim add my-project '样本数为 10' --evidence EVIDENCE_ID --attribution 'fixture operator' --numeric '{"key":"samples","value":10,"unit":"items"}'
+python3 -m work_assistant claim supersede OLD_CLAIM_ID --replacement NEW_CLAIM_ID --reason '去重后更正'
+python3 -m work_assistant claim retract CLAIM_ID --reason '源观测已撤回'
+python3 -m work_assistant report my-project --date 2026-01-15
+python3 -m work_assistant publish REPORT_ID --dry-run
+```
+
+`EVIDENCE_ID`、`CLAIM_ID`、`REPORT_ID` 替换为输出 ID。数字明确与源 JSON `values` 的 value/unit 比对；文本中出现相同数字不等于验证。缺乏数字时不生成虚构百分比。手工等级可选 measured/reproduced/derived/code_observed/reported，并始终保留 attribution 和校验范围。derived 需要 `--derivation '公式' --input CLAIM_ID`；程序检查输入链存在、有效，不执行公式。源文件精确复制、哈希校验，原文件不变。
+
+`evidence ingest` 只读取配置 `ingest_paths` 中列出的精确文件，不改其他项目的源数据。报告基于有上限的一致性快照，当前实现每个快照最多 1000 条任务/结论/更正/证据，原始文件每份最多 20 MiB，观测预览最多 32 KiB。所有已知事实按新到旧排列；日期是报告归档周期，既有任务与跨周期更正继续显示，并非只截取当天事件。游标记录成功快照的收集边界；新快照保留完整的当前事实和更正，旧快照不可变。文件全部写好后才提交快照/游标；发布失败不影响收集。没有来源的责任人、截止期或承诺不会被自动添加。
+
+## 飞书预览和真实发布
+
+dry-run 不需要凭证也不联网。真实自建应用模式需要设置配置所引用的 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_RECEIVE_ID`；可选 `FEISHU_FOLDER_TOKEN` 指定应用可编辑的文件夹。应用必须拥有文档创建/编辑及向该接收者发消息的权限，机器人需在目标群/用户可见范围内，报告文档应由本工具独占编辑。秘密仅放环境变量；不要写入仓库。
+
+```sh
+python3 -m work_assistant publish REPORT_ID --confirm
+```
+
+每位使用者需要在自己的飞书租户建立自建应用或 Webhook，使用自己有权限的文档空间和目的地；仓库不附带共享应用、租户、机器人或账号。先用自己专用的测试目的地验收。没有配置时明确报错。本开发实现未向真实飞书发送；本地 HTTP server 验证 API 协议和故障状态。应用模式创建/更新 docx 文档块和 interactive 卡片，保存文档、块、消息 ID。相同目的地+项目+周期复用资源；相同内容无请求；变更内容更新已有资源。单个 CLI 对真实 API 节流，服务端应用错误仍立即失败。Webhook 设置 `publisher.mode=webhook` 并配置 `FEISHU_WEBHOOK`，只发送卡片，文档留本地；Webhook 没有消息更新能力，已发布周期的新内容会明确拒绝，需改用应用模式。
+
+精确预配置目的地 grant 使用 `app:<sha256([app_id,receive_id_type,receive_id,folder_token])>` 或 `webhook:<sha256(webhook_url)>`，序列化规则为 UTF-8、排序 key、紧凑 JSON，与代码 `util.digest` 一致。grants 默认空；通常使用逐次 `--confirm` 即可，模型输出不能建立 grant。
+
+官方 API 参考：[租户 token](https://open.feishu.cn/document/server-docs/authentication-management/access-token/tenant_access_token_internal)、[创建文档](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/create)、[创建块](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/create)、[更新块](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/patch)、[发送消息](https://open.feishu.cn/document/server-docs/im-v1/message/create)、[更新卡片](https://open.feishu.cn/document/server-docs/im-v1/message/patch)。
+
+## 未知结果与恢复
+
+```sh
+python3 -m work_assistant reconcile RUN_ID
+python3 -m work_assistant reconcile RUN_ID --resolution failed --reason '已人工检查工作区，准备单独重试'
+python3 -m work_assistant route TASK_ID --no-cache
+python3 -m work_assistant reconcile PUBLICATION_ID
+python3 -m work_assistant reconcile PUBLICATION_ID --resolution retry_authorized --reason '已确认未创建卡片，并检查了文档 ID'
+python3 -m work_assistant publish REPORT_ID --confirm --retry
+```
+
+先读 `task show` 的运行记录或 publish 返回的 publication_id。reconcile 不继续 agent，不补发卡片。运行 unknown 只允许有理由的 completed/failed/cancelled 人工处理；该完成记录不可代替真实独立 review。中断的 routing 可用 `reconcile TASK_ID` 检查无活进程后恢复为 needs_user，随后显式 route。发布核对读取已知远端 ID 的元信息与内容；缺失 ID 时请人工核对目标端，用 `--remote-ids '{"document_id":"...","message_id":"...","block_ids":["..."]}'` 提供已查到的对应资源，再决定 completed/retry_authorized/cancelled。不要凭没有本地 ID 推断远端没有效果。
+
+## Paseo 集成与验证范围
+
+不新增 scheduler/daemon，不修改现有 schedules。把已有 Paseo schedule/agent 的工作目录设为本仓库，运行上述一次性 CLI 即可。例如已有每日流程运行 `python3 -m work_assistant report my-project --date YYYY-MM-DD`，读取报告后以 dry-run 检查；若未配置精确发布 grant，则留待用户显式 publish。给调度 agent 的约束示例：“只运行指定项目 report 命令，回传 report ID/路径；发现 unknown 就回报，不自动 resume/retry，不发外部消息。”写任务由用户先建好并授权，调度 agent 只操作明确给出的 task ID。
+
+离线 unittest 覆盖严格路由、工具调用升级、一次规划失败、意图/授权不扩大、三种事件解析、进程终止/输出上限、并发与 fencing、证据链和更正、确定性导出、HTML/秘密处理、HTTP 200 应用报错、分步 checkpoint、unknown 核对与 create/update/no-op。测试只监听回环地址，不联系真实服务。macOS/Linux 支持本地任务锁；Windows 暂不支持实际并发运行。真实登录、模型账号权限、安装版本差异和飞书权限需要用户在隔离合成工作区自选进行 live 冒烟，不属于离线通过的证明。
+
+更多约束见 [SECURITY.md](SECURITY.md)、[PLAN.md](PLAN.md)。

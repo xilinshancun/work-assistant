@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-work-assistant"
+version = "0.1.0"
+description = "Local-first personal assistant with durable evidence and explicit publishing"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {file = "LICENSE"}
+dependencies = []
+
+[project.scripts]
+wa = "work_assistant.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["work_assistant*"]

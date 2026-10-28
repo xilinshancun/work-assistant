@@ -1,0 +1,19 @@
+{
+  "state_dir": ".wa",
+  "providers": {
+    "dsh": {"argv": ["dsh"], "env": {}, "timeout": 25},
+    "codex": {"argv": ["codex"], "env": {}, "timeout": 600, "planner_effort": "low", "effort": "medium"},
+    "claude_code": {"argv": ["claude"], "env": {}, "timeout": 600}
+  },
+  "publisher": {
+    "mode": "app",
+    "app_id_env": "FEISHU_APP_ID",
+    "app_secret_env": "FEISHU_APP_SECRET",
+    "receive_id_env": "FEISHU_RECEIVE_ID",
+    "receive_id_type": "chat_id",
+    "folder_token_env": "FEISHU_FOLDER_TOKEN",
+    "webhook_env": "FEISHU_WEBHOOK",
+    "grants": []
+  },
+  "ingest_paths": ["sample-observation.json"]
+}

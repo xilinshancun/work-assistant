@@ -1,0 +1,7 @@
+{
+  "note": "Synthetic example, not a real experiment",
+  "values": {
+    "samples": {"value": 10, "unit": "items"},
+    "duration": {"value": 3.5, "unit": "seconds"}
+  }
+}
