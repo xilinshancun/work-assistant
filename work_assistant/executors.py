@@ -18,7 +18,8 @@ ROUTE_SCHEMA["required"] = list(ROUTE_SCHEMA["properties"])
 
 def parse(provider, result):
     answer = {"status": "failed", "text": "", "session_id": None, "tool_calls": False,
-              "error": "", "latency_ms": result.latency_ms, "stderr": redact(result.stderr)}
+              "error": "", "latency_ms": result.latency_ms, "stderr": redact(result.stderr),
+              "protocol_log": redact(result.stdout)}
     if result.timed_out or result.truncated or result.returncode < 0:
         answer.update(status="outcome_unknown", error="timeout, killed process or output limit")
         return answer
@@ -145,7 +146,7 @@ class Providers:
                         parsed["text"] = redact(output.read_text(encoding="utf-8"))
                 for key, value in env.items():
                     if any(word in key.lower() for word in ("secret", "token", "password", "key")) and len(value) >= 8:
-                        for field in ("text", "stderr", "error"):
+                        for field in ("text", "stderr", "error", "protocol_log"):
                             parsed[field] = parsed[field].replace(value, "[REDACTED]")
                 return parsed
             except OSError as exc:

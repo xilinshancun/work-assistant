@@ -78,6 +78,8 @@ class ParserTests(unittest.TestCase):
         for bad in (good.rsplit("\n", 1)[0], good + '\n{"type":"error"}', good[:-2]):
             self.assertEqual(parse("dsh", ProcessResult(bad))["status"], "failed")
         self.assertTrue(parse("dsh", ProcessResult(good + '\n{"type":"tool_call"}'))["tool_calls"])
+        self.assertIn('"type":"final"', parse("dsh", ProcessResult(good))["protocol_log"])
+        self.assertIn('"type":"error"', parse("dsh", ProcessResult(good + '\n{"type":"error"}'))["protocol_log"])
 
     def test_codex_terminal(self):
         good = events({"type": "thread.started", "thread_id": "thread1"},
