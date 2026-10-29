@@ -191,15 +191,14 @@ def render_import(snapshot):
                        (s["id"], s["summary"], s["verified_at"]) for s in selected["sources"]]
     evidence_lines += ["局限 / Limitations"] + (selected["limitations"] or ["源未列出 / None supplied by source"])
     evidence_text = "\n".join(evidence_lines)
-    plain = title + "\n" + interval + "\n" + SCOPE + "\n\n" + body + "\n\n" + evidence_text
+    plain = title + "\n" + interval + "\n\n" + body
     document = {"title": title, "children": document_blocks(plain)}
     # Card limits never silently truncate the source summary. Split into native text elements.
     card_text = interval + "\n" + summary
     card = {"config": {"wide_screen_mode": True, "update_multi": True},
             "header": {"title": {"tag": "plain_text", "content": title}},
             "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": card_text[i:i + 1500]}}
-                         for i in range(0, len(card_text), 1500)]
-                         + [{"tag": "note", "elements": [{"tag": "plain_text", "content": SCOPE}]}]}
+                         for i in range(0, len(card_text), 1500)]}
 
     def paragraphs(text):
         return "".join("<p>" + escape(line) + "</p>" for line in text.splitlines())
@@ -210,21 +209,22 @@ def render_import(snapshot):
                 + escape(title) + "</title><style>" + STYLE + "</style></head><body><main>"
                 + text + "</main></body></html>")
 
-    header = "<header><h1>" + escape(title) + "</h1><p>" + escape(interval) + "</p><p>" + escape(SCOPE) + "</p></header>"
+    header = "<header><h1>" + escape(title) + "</h1><p>" + escape(interval) + "</p></header>"
     return {"index.html": page(header + "<section id='sync-summary'>" + paragraphs(summary)
                                 + "</section><section>" + paragraphs(body)
                                 + "</section><a href='evidence.html'>证据 / Evidence</a>"),
-            "daily-sync.md": "# " + md_text(title) + "\n\n" + md_text(interval) + "\n\n" + SCOPE
-                             + "\n\n" + "\n\n".join(md_text(line) for line in body.splitlines())
-                             + "\n\n" + "\n\n".join(md_text(line) for line in evidence_lines) + "\n",
-            "evidence.html": page(header + "<section>" + paragraphs(evidence_text)
+            "daily-sync.md": "# " + md_text(title) + "\n\n" + md_text(interval)
+                             + "\n\n" + "\n\n".join(md_text(line) for line in body.splitlines()) + "\n",
+            "evidence.html": page(header + "<p>" + escape(SCOPE) + "</p><section>" + paragraphs(evidence_text)
                                   + "</section><a href='index.html'>完整报告 / Full report</a>"),
             "evidence.json": dumps(snapshot), "card.json": dumps(card), "document.json": dumps(document),
             "card-preview.html": page(header + "<section>" + paragraphs(summary)
                                       + "</section><a href='index.html'>完整报告 / Full report</a>")}
 
 
-def import_daily(store, project, source_root, period, timezone_name="Asia/Shanghai"):
+def import_daily(store, project, source_root, period, timezone_name="Asia/Shanghai", title=None):
+    if title is not None:
+        title = _text(title, "display title", 200).strip()
     try:
         requested = date.fromisoformat(period)
         zone = ZoneInfo(timezone_name)
@@ -266,13 +266,14 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
             raise ValueError("source validation.status must be passed")
         if validation.get("report_sha256") != digest(report_raw):
             raise ValueError("source validation report_sha256 mismatch")
-        title, summary, body = VisibleReport().extract(report_raw)
+        source_title, summary, body = VisibleReport().extract(report_raw)
         coverage = {"covered_from": evidence["covered_from"], "covered_until": evidence["covered_until"]}
         selected = _evidence_summary(evidence)
         snapshot = redact_data({"schema": "wa.report.v1", "origin": "external_daily_import",
             "project": p["name"], "project_id": p["id"], "date": period, "timezone": timezone_name,
             "source_hashes": {"report": digest(report_raw), "evidence": digest(evidence_raw), "state": digest(state_raw)},
-            "coverage": coverage, "title": title, "summary": summary, "body": body,
+            "coverage": coverage, "title": source_title if title is None else title,
+            "source_title": source_title, "summary": summary, "body": body,
             "scope": SCOPE, "tasks": [], "claims": [], "corrections": [], "evidence": selected})
         content = render_import(snapshot)
         # Re-read every input, including state, after extraction/rendering. Changed bytes,

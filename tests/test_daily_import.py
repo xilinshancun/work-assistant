@@ -102,9 +102,14 @@ class DailyImportTests(Base):
         self.assertNotIn("第一条中文详情", card_text)
         document = preview(self.s, report["id"])["document"]
         text = "\n".join(b["text"]["elements"][0]["text_run"]["content"] for b in document["children"])
-        for expected in ("2026-01-15", "第一条中文详情", "第二条限定", "折叠的完整细节", "尚未独立复现", "[REDACTED]", "reported"):
+        for expected in ("2026-01-15", "第一条中文详情", "第二条限定", "折叠的完整细节", "尚未独立复现"):
             self.assertIn(expected, text)
-        self.assertLess(text.index("折叠的完整细节"), text.index("证据摘要"))
+        for forbidden in (daily_import.SCOPE, "证据摘要", "十个合成样本；仅为源陈述", "s1", "verified_at", "[REDACTED]"):
+            self.assertNotIn(forbidden, text)
+            self.assertNotIn(forbidden, dumps(card))
+        self.assertIn("十个合成样本；仅为源陈述", files["evidence.html"])
+        self.assertIn("[REDACTED]", files["evidence.json"])
+        self.assertIn(daily_import.SCOPE, files["evidence.html"])
         self.assertIn("&lt;unsafe&gt;", files["index.html"])
         for raw in files.values():
             for forbidden in ("head-active", "body-active", "style-active", "frame-active", "hidden-active",
@@ -132,6 +137,29 @@ class DailyImportTests(Base):
         Path(second["data"]["path"], "index.html").write_text("tampered")
         with self.assertRaisesRegex(ValueError, "immutable report"):
             self.load()
+
+    def test_title_override_changes_display_hash_preserves_source_and_period(self):
+        source_before = self.report_path.read_bytes()
+        first = self.load()
+        title = "合成日报 · 2026-01-15 提前预览"
+        updated = self.load(title=title)
+        payload = preview(self.s, updated["id"])
+        self.assertEqual(payload["document"]["title"], title)
+        self.assertEqual(payload["card"]["header"]["title"]["content"], title)
+        self.assertEqual(payload["document"]["children"][0]["text"]["elements"][0]["text_run"]["content"], title)
+        self.assertNotEqual(first["data"]["hash"], updated["data"]["hash"])
+        self.assertEqual(first["data"]["period"], updated["data"]["period"])
+        self.assertEqual(first["data"]["source_hashes"], updated["data"]["source_hashes"])
+        self.assertEqual(source_before, self.report_path.read_bytes())
+        original_snapshot = json.loads(self.files(first)["evidence.json"])
+        updated_snapshot = json.loads(self.files(updated)["evidence.json"])
+        self.assertEqual(original_snapshot["body"], updated_snapshot["body"])
+        self.assertEqual(updated_snapshot["source_title"], "合成项目 · 每日进展")
+        self.assertEqual(updated["id"], self.load(title=title)["id"])
+        for invalid in ("", " \n\t", "字" * 201):
+            with self.subTest(title=invalid), self.assertRaisesRegex(ValueError, "display title"):
+                self.load(title=invalid)
+        self.assertEqual(preview(self.s, self.load(title="字" * 200)["id"])["document"]["title"], "字" * 200)
 
     def test_next_day_does_not_accumulate_old_claims(self):
         self.load()
@@ -274,7 +302,7 @@ class DailyImportTests(Base):
             self.assertTrue(repeat["no_op"])
             self.assertEqual(len(transport.calls), count)
             self.write_bundle(HTML.replace("合成样本十个", "更正：合成样本八个"))
-            second_report = self.load()
+            second_report = self.load(title="同一周期的修订预览")
             second = publish(self.s, self.conf["publisher"], second_report["id"], confirm=True, transport=transport)
             self.assertEqual(second["status"], "completed")
             for key in ("identity", "document_id", "message_id"):
@@ -311,6 +339,9 @@ class DailyImportTests(Base):
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             return json.loads(result.stdout)
-        report = cli("import-daily", self.p["id"], "--source-root", str(self.bundle), "--date", PERIOD)
-        self.assertEqual(cli("publish", report["id"], "--dry-run")["status"], "dry_run")
+        report = cli("import-daily", self.p["id"], "--source-root", str(self.bundle), "--date", PERIOD,
+                     "--title", "合成 CLI 提前预览")
+        payload = cli("publish", report["id"], "--dry-run")
+        self.assertEqual(payload["status"], "dry_run")
+        self.assertEqual(payload["document"]["title"], "合成 CLI 提前预览")
         self.assertEqual(self.s.records("publication"), [])
