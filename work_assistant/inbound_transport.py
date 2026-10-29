@@ -21,6 +21,10 @@ class Consumer:
         # client identity/config/bot-info preflight is completed by the caller.
         argv=self.client.argv+['event','consume',EVENT,'--as','bot']
         env,_=subprocess_environment(self.client.environment,inherit_env=False)
+        # cwd is the same authenticated config directory. Relative IPC paths
+        # keep macOS's 103-byte Unix socket limit from breaking long workspaces;
+        # no credentials/config are copied and the selected profile is unchanged.
+        env['LARKSUITE_CLI_CONFIG_DIR']='.'
         try:
             self.proc=self.popen(argv,cwd=self.client.settings['cli_config_dir'],env=env,
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,

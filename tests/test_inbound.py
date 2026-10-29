@@ -532,6 +532,11 @@ class StreamTests(unittest.TestCase):
         lines=[];diag=[];consumer=Consumer(Client(),popen);consumer.start(lines.append,diag.append)
         for thread in consumer.threads:thread.join()
         self.assertTrue(consumer.ready.is_set());self.assertEqual(diag,['ready','delivery_gap']);self.assertEqual(lines,[source])
+        # Relative socket paths resolve inside the exact authenticated directory,
+        # even when its absolute path exceeds macOS's Unix socket path limit.
+        child = calls[0][1]
+        self.assertEqual((Path(child['cwd']) / child['env']['LARKSUITE_CLI_CONFIG_DIR']).resolve(), Path(Client.settings['cli_config_dir']).resolve())
+        self.assertLess(len(str(Path(child['env']['LARKSUITE_CLI_CONFIG_DIR']) / 'events' / 'cli_synthetic' / 'bus.sock').encode()), 104)
         self.assertFalse(proc.stdin.closed);self.assertIs(calls[0][1]['stdin'],subprocess.PIPE);self.assertNotIn('--quiet',calls[0][0]);consumer.close()
         self.assertTrue(proc.stdin.closed)
 
