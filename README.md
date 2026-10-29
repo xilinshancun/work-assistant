@@ -263,6 +263,8 @@ reconcile 只发 GET 并记录显式本地决议，不执行远端写入；它�
 
 ## 未知结果与恢复
 
+可选的本人飞书私聊／测试群 @ 入口见 [入站 V1](docs/inbound.md) 和 [通用配置](examples/config.inbound.example.json)。默认禁用，由显式前台命令启动官方 CLI 事件流；DS 快答，复杂问题交 Paseo GPT，只读调查并可用一层 CC/Codex 子任务。此入口不改日报调度，不接受其他发送者或任意群授权；真实接入需使用者自行验收。
+
 ```sh
 python3 -m work_assistant reconcile RUN_ID
 python3 -m work_assistant reconcile RUN_ID --resolution failed --reason '已人工检查工作区，准备单独重试'

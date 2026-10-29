@@ -101,6 +101,21 @@ All live sending must be explicitly requested (`--confirm`, or an exact configur
 
 ## Tests and acceptance
 
+Opt-in inbound intake is a separate foreground command, disabled by default.
+Only the configured owner DM or owner mentioning the verified bot in one trusted
+test group is accepted; official CLI flattened events are durably deduplicated by
+app/message ID. DS has no tools and emits strict inbound-answer/escalate JSON.
+Paseo deep work is pinned to an isolated detached worktree with immutable read
+authority, explicit optional one-level children and no external effects. This is
+an auto-review task contract, not an OS sandbox guarantee. A private nonce-bound
+result artifact requires independent wait/inspect terminal checks. Replies reuse
+the outgoing-message state machine and original event chat only. Unknown launches
+are label-inspected, never recreated; unresolved sends never repost. Consumer stdin
+stays open, a dedicated reader journals inputs, and official ready/gap diagnostics
+are recorded. The event bus is at-most-once, so no durability/replay promise is made.
+No schedule, application-console configuration, credential export or production
+edit is part of enabling this module. See docs/inbound.md for exact protocols.
+
 Native timeline trees use `wa.document.tree.v1` (`blocks`, callout `child_blocks`)
 without mixing local object arrays into official remote `children` ID arrays.
 The existing binding/publication locks and per-effect journal remain authoritative.

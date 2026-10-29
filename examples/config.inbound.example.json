@@ -1,0 +1,30 @@
+{
+  "state_dir": ".wa",
+  "publisher": {
+    "mode": "app",
+    "transport": "lark_cli",
+    "cli_argv": ["lark-cli"],
+    "cli_config_dir": "private-lark-cli",
+    "cli_profile": "work-assistant",
+    "expected_app_id": "cli_REPLACE_WITH_YOUR_APP",
+    "receive_id_type": "chat_id",
+    "receive_id_env": "FEISHU_RECEIVE_ID"
+  },
+  "inbound": {
+    "enabled": false,
+    "expected_app_id": "cli_REPLACE_WITH_YOUR_APP",
+    "owner_open_id": "ou_REPLACE_WITH_YOUR_OWN_OPEN_ID",
+    "test_chat_id": "oc_REPLACE_WITH_APPROVED_TEST_CHAT",
+    "project_id": "REPLACE_WITH_EXISTING_READ_PROJECT_ID",
+    "max_action": "read",
+    "max_age_s": 600,
+    "future_skew_s": 30,
+    "max_inflight_gpt": 1,
+    "paseo_argv": ["paseo"],
+    "gpt_provider": "codex",
+    "gpt_model": null,
+    "cli_timeout": 75,
+    "poll_interval": 5,
+    "worktree_root": "../work-assistant-inbound-worktrees"
+  }
+}
