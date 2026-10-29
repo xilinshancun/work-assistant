@@ -42,11 +42,19 @@ def _reply_bytes(text,msg_type):
 def ident(app,message):return 'inbound_'+digest([app,message])[:32]
 
 
+def settings_hash(settings):
+    # This presentation preference affects only unfrozen ack decisions, not the
+    # event's authority. Existing intents/final plans keep their frozen delivery.
+    return digest({key:value for key,value in settings.items() if key!='group_ack_policy'})
+
+
 def validate(conf,store,enabled=False):
     value=copy.deepcopy(conf.get('inbound',{'enabled':False}))
     if type(value) is not dict or type(value.get('enabled',False)) is not bool:
         raise ValueError('inbound.enabled must be a boolean')
     if enabled and value.get('enabled') is not True:raise ValueError('inbound disabled; explicitly configure before run')
+    if type(value.get('group_ack_policy','thread')) is not str or value.get('group_ack_policy','thread') not in ('thread','none'):
+        raise ValueError('inbound.group_ack_policy must be thread or none')
     required={'expected_app_id','owner_open_id','test_chat_id','project_id','gpt_provider'}
     if not required.issubset(value):raise ValueError('inbound requires app, owner, test chat, project and trusted provider')
     def identifier(name,prefix):
@@ -157,7 +165,7 @@ class Engine:
             if self.store.db.execute('SELECT 1 FROM records WHERE id=?',(key,)).fetchone():return None
             data={'schema':'wa.inbound.event.v1','app_id':self.settings['expected_app_id'],'event':e,
                   'status':'ignored' if reason else 'received','reason':reason,'created':now(),
-                  'settings_hash':digest(self.settings),'authority':{'action':'read','project_id':self.settings['project_id']}}
+                  'settings_hash':settings_hash(self.settings),'authority':{'action':'read','project_id':self.settings['project_id']}}
             if not reason:
                 artifact=self.store.root/'inbound'/key/'user.txt';private_write(artifact,text.encode())
                 data.update(source_artifact=str(artifact),text_hash=digest(text.encode()))
@@ -263,7 +271,12 @@ class Engine:
         others=[r for r in self.records() if r['id']!=record['id'] and r['data'].get('cwd') and
                 (r['data']['status'] in ACTIVE or r['data'].get('gpt_unresolved'))]
         if others:return self.final(record,'有深度任务进行中，请稍后。','needs_user')
-        record=self.reply(record,'ack','收到，正在处理；完成后会回复这条消息。')
+        if (record['data']['event']['chat_type']=='group' and not record['data'].get('ack_intent')
+                and (record['data'].get('ack_skipped') or self.settings.get('group_ack_policy','thread')=='none')):
+            if not record['data'].get('ack_skipped'):
+                record=self.save(record,ack_skipped={'reason':'trusted_group_ack_policy_none','policy':'none','at':now()})
+        else:
+            record=self.reply(record,'ack','收到，正在处理；完成后会回复这条消息。')
         data=record['data'];project=self.store.project(self.settings['project_id'])
         root=Path(self.settings['worktree_root']);root.mkdir(parents=True,exist_ok=True,mode=0o700)
         if root.is_symlink():raise ProtocolError('worktree parent cannot be a symlink')
@@ -332,7 +345,7 @@ class Engine:
 
     def advance(self,record):
         data=record['data']
-        if data.get('settings_hash')!=digest(self.settings):raise ProtocolError('inbound config changed; inspect original authorization')
+        if data.get('settings_hash')!=settings_hash(self.settings):raise ProtocolError('inbound config changed; inspect original authorization')
         if data.get('diagnostic_final'):return record
         status=data['status']
         if status in {'received','triaging'}:record=self.classify(record);status=record['data']['status']
@@ -363,7 +376,7 @@ class Engine:
         record=self.store.get(key)
         if record['kind']!=KIND:raise ValueError('expected inbound event key')
         data=record['data']
-        if data.get('app_id')!=self.settings['expected_app_id'] or data.get('settings_hash')!=digest(self.settings):
+        if data.get('app_id')!=self.settings['expected_app_id'] or data.get('settings_hash')!=settings_hash(self.settings):
             raise ProtocolError('inspect requires the original application and trusted inbound settings')
         result={'record':record,'note':'Read-only remote inspection; no prompt/send/create/retry'}
         if data.get('launch_intent') and not data.get('agent_id'):
@@ -391,7 +404,7 @@ class Engine:
     def resolve(self,key,absent,reason):
         if absent is not True or type(reason) is not str or not reason.strip():raise ValueError('resolution requires --absent and nonempty reason')
         record=self.store.get(key);data=record['data']
-        if data.get('app_id')!=self.settings['expected_app_id'] or data.get('settings_hash')!=digest(self.settings):
+        if data.get('app_id')!=self.settings['expected_app_id'] or data.get('settings_hash')!=settings_hash(self.settings):
             raise ProtocolError('resolution requires the original application and inbound settings')
         if record['kind']!=KIND or not data.get('launch_intent') or data.get('agent_id') or data['status'] not in {'gpt_dispatching','outcome_unknown'}:
             raise ValueError('only an unresolved no-ID launch can be confirmed absent')
@@ -409,7 +422,7 @@ class Engine:
         if type(reason) is not str or not reason.strip():raise ValueError('resolution requires nonempty operator reason')
         record=self.store.get(key);data=record['data']
         if (record['kind']!=KIND or data.get('app_id')!=self.settings['expected_app_id'] or
-                data.get('settings_hash')!=digest(self.settings) or not data.get('agent_id') or
+                data.get('settings_hash')!=settings_hash(self.settings) or not data.get('agent_id') or
                 not data.get('gpt_unresolved') or data['status'] not in {'needs_user','final_unknown'}):
             raise ValueError('finished resolution requires the original stopped, unresolved agent')
         view=self.paseo.inspect(data['agent_id'],data['cwd'])

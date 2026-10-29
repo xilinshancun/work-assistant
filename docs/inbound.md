@@ -196,3 +196,15 @@ The planned final freezes `final_delivery` with the payload format/hash; the
 send intent stores that same delivery context. Legacy frozen plans/intents without
 delivery fields retain their original ordinary-send behavior. Completed/unknown
 old actions are not migrated or replayed.
+
+Trusted `inbound.group_ack_policy` accepts `thread` (default) or `none`, affecting
+groups only. `none` omits the separate acknowledgement and records
+`ack_skipped.reason=trusted_group_ack_policy_none`; it creates neither ack intent
+nor a fabricated receipt. The final still quotes the original user message once.
+This avoids creating an ack topic that could force the final into that topic;
+an original message already in a topic remains subject to the service's placement
+rules. P2p acknowledgements are unchanged. A frozen ack intent or final delivery is
+never rewritten when this preference changes. It is excluded from the authority
+settings hash so old frozen plans remain recoverable; all other configuration
+identity/authority checks remain in force. An already recorded ack skip remains
+skipped rather than being recreated after a later preference change.

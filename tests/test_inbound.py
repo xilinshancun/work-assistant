@@ -284,6 +284,58 @@ class InboundTests(unittest.TestCase):
         self.assertEqual(done['data']['final_delivery']['reply_to_message_id'],'om_synthetic')
         self.assertFalse(done['data']['final_delivery']['reply_in_thread'])
 
+    def test_group_none_skips_ack_without_receipt_then_sends_only_final_quote_once(self):
+        self.conf['inbound']['group_ack_policy']='none';self.engine=self.new_engine()
+        self.engine.sender=self.engine._send
+        self.ds.value=decision(decision='escalate',answer=None)
+        transport=FakeReplyHTTP(self.store,'om_synthetic');settings=dict(load(self.root/'blank.json')['publisher'])
+        def shared_send(store,_settings,*args,**kwargs):
+            return messages.send(store,settings,*args,transport=transport,**kwargs)
+        with patch.dict(os.environ,{'FEISHU_APP_ID':'cli_fixture','FEISHU_APP_SECRET':'synthetic-secret'}), \
+                patch('work_assistant.inbound.send_message',side_effect=shared_send):
+            record=self.engine.advance(self.accept(chat_type='group',mentions=[{'id':'ou_bot'}]))
+            self.assertEqual(record['data']['status'],'gpt_running');self.assertEqual(transport.calls,[])
+            self.assertNotIn('ack_intent',record['data']);self.assertNotIn('ack_receipt',record['data'])
+            self.assertEqual(record['data']['ack_skipped']['reason'],'trusted_group_ack_policy_none')
+            done=self.engine.advance(record);self.engine.advance(done)
+        self.assertEqual(done['data']['status'],'completed');self.assertEqual(len(transport.posts()),1)
+        self.assertTrue(transport.posts()[0][1].endswith('/om_synthetic/reply'))
+        self.assertIs(transport.posts()[0][2]['reply_in_thread'],False)
+        self.assertEqual(len(self.store.records(messages.KIND)),1)
+
+    def test_group_ack_policy_does_not_change_p2p_or_existing_frozen_group_intent(self):
+        record=self.deep(chat_type='group',mentions=[{'id':'ou_bot'}])
+        original=copy.deepcopy(record['data']['ack_intent']);receipt=copy.deepcopy(record['data']['ack_receipt'])
+        self.conf['inbound']['group_ack_policy']='none';self.engine=self.new_engine()
+        done=self.engine.advance(record)
+        self.assertEqual(done['data']['status'],'completed');self.assertEqual(len(self.replies),2)
+        self.assertEqual(done['data']['ack_intent'],original);self.assertEqual(done['data']['ack_receipt'],receipt)
+        self.assertNotIn('ack_skipped',done['data'])
+        record=self.deep(message_id='om_new_p2p')
+        self.assertIn('ack_intent',record['data']);self.assertNotIn('ack_skipped',record['data'])
+        self.assertFalse(record['data']['ack_intent']['delivery']['reply_in_thread'])
+
+    def test_policy_change_keeps_frozen_final_payload_hash_and_delivery(self):
+        record=self.accept()
+        with patch.object(self.engine,'reply',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):self.engine.advance(record)
+        record=self.store.get(record['id']);frozen=copy.deepcopy(record['data']['final_delivery'])
+        hash_value=record['data']['final_text_hash']
+        self.conf['inbound']['group_ack_policy']='none';self.engine=self.new_engine()
+        done=self.engine.advance(record)
+        self.assertEqual(done['data']['status'],'completed')
+        self.assertEqual(done['data']['final_text_hash'],hash_value)
+        self.assertEqual(done['data']['final_intent']['delivery'],frozen)
+
+    def test_invalid_group_ack_policy_rejected_and_authority_changes_still_block(self):
+        for value in ('',None,True,[],{},'direct','THREAD'):
+            with self.subTest(value=value):
+                self.conf['inbound']['group_ack_policy']=value
+                with self.assertRaisesRegex(ValueError,'group_ack_policy'):self.new_engine()
+        self.conf['inbound']['group_ack_policy']='thread';self.engine=self.new_engine();record=self.accept()
+        self.conf['inbound']['max_age_s']=599;self.engine=self.new_engine()
+        with self.assertRaisesRegex(ProtocolError,'config changed'):self.engine.advance(record)
+
     def test_old_frozen_text_plan_default_adapter_still_sends_direct_once(self):
         record=self.accept();text='Legacy frozen complete text'
         private_write(self.store.root/'inbound'/record['id']/'final.txt',text.encode())
