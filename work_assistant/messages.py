@@ -6,6 +6,7 @@ import re
 import sqlite3
 import stat
 import sys
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -132,8 +133,10 @@ def _remote_resources(data):
     return []
 
 
-def _readback(store, record, client):
+def _readback(store, record, client, persist=True):
     data = record["data"]
+    def save(**changes):
+        return _save(store, record, **changes) if persist else dict(record, data=dict(data, **changes))
     try:
         source = Path(data["source_artifact"])
         flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
@@ -165,19 +168,21 @@ def _readback(store, record, client):
             checks["text"] = checks.pop("content")
         verified = all(checks.values())
         scope = "readable_card_content_identity_and_chat; URLs/styles retained in sent payload, not independently verified by GET" if card is not None else "exact_text_identity_and_chat"
-        record = _save(store, record, checks=checks, status="completed" if verified else "verification_pending",
+        record = save(checks=checks, status="completed" if verified else "verification_pending",
                        verification_status="verified" if verified else "verification_pending",
                        error=None if verified else "readback_does_not_match_expected_message",
                        verified_at=now() if verified else None, verification_scope=scope,
-                       **({"pending": None} if verified and data.get("operation") == "update_card" else {}))
+                       **({"pending": None} if verified and data.get("operation") == "update_card" else {}),
+                       readback_create_time=message.get("create_time"), card_update_multi=card["config"].get("update_multi") if card else None)
     except BaseException as exc:
-        record = _save(store, record, status="verification_pending", verification_status="verification_pending",
+        record = save(status="verification_pending", verification_status="verification_pending",
                        error="readback_unavailable_or_invalid; known sent ID retained; inspect only", verified_at=None, checks={})
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
-    with store.transaction():
-        store.record("message_observation", {"action_id": record["id"], "message_id": data["message_id"],
-                     "verification_status": record["data"]["verification_status"], "checks": record["data"].get("checks", {})})
+    if persist:
+        with store.transaction():
+            store.record("message_observation", {"action_id": record["id"], "message_id": data["message_id"],
+                         "verification_status": record["data"]["verification_status"], "checks": record["data"].get("checks", {})})
     return record
 
 
@@ -280,6 +285,8 @@ def update_card(store, settings, action_id, request_id, card_file, confirm=False
         card = parse_card(text)
     except ValueError:
         raise MessageError("card-file must be a supported display-only card") from None
+    if card["config"].get("update_multi") is not True:
+        raise MessageError("update-card requires new card config.update_multi=true")
     original = _find(store, action_id)
     if original is None:
         raise MessageError("unknown outgoing message action ID")
@@ -317,12 +324,20 @@ def update_card(store, settings, action_id, request_id, card_file, confirm=False
             if client.app_id() != old["expected_sender_app_id"]:
                 raise MessageError("update-card requires the original application identity")
             client.authenticate()
-            checked = _readback(store, original, client)
+            checked = _readback(store, original, client, persist=False)
             if checked["data"]["status"] != "completed":
                 raise MessageError("original card readback differs or is unavailable; no update permitted")
+            if checked["data"].get("card_update_multi") is not True:
+                raise MessageError("update-card requires original private card config.update_multi=true")
+            created = checked["data"].get("readback_create_time")
+            if type(created) is not str or not re.fullmatch(r"[0-9]{1,17}", created):
+                raise MessageError("update-card requires a valid GET create_time to verify the 14-day limit")
+            age_ms = time.time() * 1000 - int(created)
+            if not 0 <= age_ms <= 14 * 24 * 60 * 60 * 1000:
+                raise MessageError("update-card is outside the supported 14-day update window")
         except BaseException as exc:
             record = _save(store, record, status="failed", verification_status="not_updated",
-                           error="update_preflight_failed; no PATCH started")
+                           error=str(exc) if isinstance(exc, MessageError) else "update_preflight_failed; no PATCH started")
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             return _receipt(record)

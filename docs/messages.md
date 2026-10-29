@@ -119,6 +119,10 @@ python3 -m work_assistant.messages --config private/config.local.json update-car
 
 The action must be the current completed/verified interactive-card receipt,
 including its original app and known chat ID (also for open_id recipients).
+Both original private payload and replacement must explicitly set
+`config.update_multi=true`. GET must supply a valid millisecond `create_time`
+within the last 14 days; old, future, missing or malformed timestamps are
+rejected before parent/supersession changes or PATCH.
 Target/message IDs cannot be substituted by CLI arguments. Default is an offline
 preview. Confirmation authenticates the original app, reads the original private
 card and known remote message, and compares the readable `card_projection`,

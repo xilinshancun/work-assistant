@@ -2,6 +2,7 @@
 import copy
 import io
 import json
+import time
 from contextlib import redirect_stdout
 from unittest.mock import patch
 import test_messages
@@ -48,7 +49,7 @@ class UpdateCardTests(unittest.TestCase):
                 raise self.failure
             return {"code": 0, "data": {}}
         if method == "GET" and "/im/v1/messages/" in url:
-            message = {"message_id": "om_fixture", "chat_id": "oc_fixture", "msg_type": "interactive",
+            message = {"message_id": "om_fixture", "chat_id": "oc_fixture", "msg_type": "interactive", "create_time": str(int(time.time()*1000)),
                        "sender": {"id": "cli_fixture", "id_type": "app_id", "sender_type": "app"},
                        "body": {"content": dumps(card_projection(self.remote))}}
             message.update(self.get_changes)
@@ -94,6 +95,45 @@ class UpdateCardTests(unittest.TestCase):
             result = self.update(confirm=False)
         self.assertEqual(result["status"], "dry_run")
         self.assertEqual(self.store.records(), before)
+
+    def test_new_and_original_update_multi_must_be_explicitly_true_without_parent_mutation(self):
+        for which in ('new', 'original'):
+            for value in (None, False):
+                self.prepare()
+                parent = copy.deepcopy(self.store.get(self.original['action_id']))
+                if which == 'new':
+                    card = copy.deepcopy(self.changed)
+                    if value is None: card['config'].pop('update_multi')
+                    else: card['config']['update_multi'] = value
+                    self.card_file.write_text(dumps(card))
+                    with self.assertRaises(messages.MessageError): self.update(request='bad-new-'+str(value))
+                else:
+                    # Create a legitimate independently sent source payload with no update grant.
+                    card = copy.deepcopy(CARD)
+                    card['header']['title']['content'] += str(len(self.store.records()))
+                    if value is None: card['config'].pop('update_multi')
+                    else: card['config']['update_multi'] = value
+                    self.source.write_text(dumps(card))
+                    self.original = messages.send(self.store,self.settings,'no-update-'+str(value),'chat_id','oc_fixture',None,
+                                                  confirm=True,card_file=self.source,transport=self.http)
+                    parent = copy.deepcopy(self.store.get(self.original['action_id']))
+                    result = self.update(request='bad-original-'+str(value))
+                    self.assertEqual(result['status'], 'failed')
+                    self.assertIn('original private card', result['error'])
+                self.assertEqual(self.store.get(self.original['action_id']), parent)
+                self.assertFalse(any(c[0] == 'PATCH' for c in self.calls))
+        self.assertEqual(self.store.records('message_supersession'), [])
+
+    def test_old_missing_future_or_malformed_create_time_rejected_without_parent_changes(self):
+        self.prepare()
+        parent = copy.deepcopy(self.store.get(self.original['action_id']))
+        for index, created in enumerate((str(int((time.time()-15*86400)*1000)), None, 'invalid', str(int((time.time()+86400)*1000)))):
+            self.get_changes = {'create_time': created}
+            result = self.update(request='bad-age-'+str(index))
+            self.assertEqual(result['status'], 'failed')
+            self.assertEqual(self.store.get(self.original['action_id']), parent)
+        self.assertFalse(any(c[0] == 'PATCH' for c in self.calls))
+        self.assertEqual(self.store.records('message_supersession'), [])
 
     def test_preflight_rejects_changed_content_sender_chat_type_or_deleted_without_patch(self):
         for index, changes in enumerate(({"chat_id": "oc_other"}, {"sender": None}, {"msg_type": "text"},
