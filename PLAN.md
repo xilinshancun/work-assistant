@@ -132,4 +132,20 @@ without API calls. Offline FakeCLI tests are protocol fixtures, not live proof.
 
 ## Implementation workflow
 
+### External daily import contract
+
+`import-daily PROJECT --source-root ROOT --date YYYY-MM-DD [--timezone Asia/Shanghai]`
+imports an explicitly selected, validated local bundle without collecting, scheduling,
+calling models, or publishing. It verifies date/timezone/watermark agreement, aware
+nonfuture coverage, original HTML SHA-256 and validation status; bounded reads stay
+inside ROOT after symlink resolution, and all inputs are re-read before committing.
+HTMLParser extracts the body title, unique sync-summary and complete readable body
+without active markup/navigation. Seven escaped standard outputs and an ordinary
+immutable report record reuse the existing publisher identity/checkpoints. Evidence
+summaries are bounded, redacted and attributed as reported; extra metadata stays in
+the private journal. Imports contain only that source bundle, leave normal collection
+cursors untouched, reject documents above 1000 blocks without truncation, and retain
+deterministic no-op / same-period update behavior. Synthetic examples live under
+examples/daily-bundle; no personal source paths or business data are tracked.
+
 Claude architect supplies the plan; Codex implementation worker owns main branch in its assigned worktree. A second Codex worker independently implements only policy.py and policy tests in a separate worktree using the exact pure interface above, to compare the critical permission boundary. Claude reviewer evaluates both and reviews the integrated implementation. Root integrates, validates live adapters, and handles authorized public GitHub creation/push after checks. No worker creates remote repositories or sends external messages.

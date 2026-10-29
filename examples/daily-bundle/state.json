@@ -1,0 +1,9 @@
+{
+  "timezone": "Asia/Shanghai",
+  "daily": {
+    "last_successful_execution_date": "2026-01-15",
+    "covered_until": "2026-01-15T17:30:00+08:00",
+    "last_report": "daily/2026-01-15.html",
+    "last_evidence": "evidence/daily-2026-01-15.json"
+  }
+}
