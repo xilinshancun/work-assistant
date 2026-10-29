@@ -34,7 +34,7 @@ python3 -m work_assistant.messages --config private/config.local.json inspect AC
 
 request-id 在共享 journal 内全局绑定原始目标类型／ID 和精确内容哈希，不按项目、日期或 worker 分开。相同 request-id 改目标或正文会拒绝；相同请求已完成则返回原 action_id、message_id 和核验结果，零发送请求。每个动作在任何发送之前生成并保存一个稳定 UUID（36 字符）、模式 0600 的原文字节副本及目标／内容哈希。不会把模型输出字段当成授权。
 
-发送在 request 锁及相同目标／内容的锁内执行：先认证，再持久写入 `sending`，最后才 POST。HTTP／CLI 的明确拒绝为 `failed`；超时、断连、损坏响应、缺 message_id 或发送后的进程中断为 `outcome_unknown`。重启看见残留 `sending` 只恢复成 unknown，不重发。认证前后尚未进入 sending 的失败为 definite failed，因为消息 POST 尚未开始。没有 V1 retry 命令：同一个 failed 请求也不会因重复 confirm 自动重试。
+发送在 request 锁及相同目标／内容的锁内执行：先认证，再持久写入 `sending`，最后才 POST。POST 阶段的所有 APIError、超时、断连、损坏响应、缺 message_id 或进程中断均保守记为 `outcome_unknown`。公共 adapter 的 APIError 没有结构化的“未生效”保证，因此不解析错误字符串猜测状态码或声称消息明确未发送。重启看见残留 `sending` 只恢复成 unknown，不重发。认证失败且尚未进入 sending 时仍为 `failed`／`not_sent`，因为消息 POST 尚未开始。没有 retry 命令：同一个 failed 请求也不会因重复 confirm 自动重试。
 
 不同 request-id 若目标和内容与已有 preparing／sending／unknown／verification_pending 动作一致，会被阻止，以免自动替换 ID 绕过未知状态。不同内容的新用户请求不能代替对原 unknown 的处理；Skill 必须持续沿用原逻辑请求 ID。用户对一个**已明确未发送的失败**作新授权时，由原始会话单独处理新的逻辑请求，工具不会自动建立它。
 
@@ -49,11 +49,41 @@ POST 返回的 message_id 先落盘，然后 GET 此 ID，只在以下检查全�
 
 GET 不可用、字段不符或私有副本被改动时，返回 `verification_pending`，保留真实已知 message_id，绝不重发。使用 `inspect ACTION_ID` 再次只读核对；读取所用应用必须与原动作一致。缺 message_id 的 unknown 保持 unresolved，inspect 不列消息猜测、不补发、不启动 agent。人工调查／新授权应在原会话中单独处理，不应直接修改 journal 来伪造完成。每次读回另存核验观测，当前结果与历史观测可区分。
 
+## 人工核实未投递后的本地解除
+
+仅当操作者已核实该消息不存在／未投递，可对 `outcome_unknown` 或
+`verification_pending` 动作明确记录 absence。先预览，再确认：
+
+```sh
+python3 -m work_assistant.messages --config private/config.local.json resolve ACTION_ID \
+  --absent --reason '操作者已核实合成目标不存在该消息／未投递。'
+
+python3 -m work_assistant.messages --config private/config.local.json resolve ACTION_ID \
+  --absent --reason '操作者已核实合成目标不存在该消息／未投递。' --confirm
+```
+
+无 `--confirm` 仅返回 dry-run，不改动作或审计记录。reason 必须是非空文本，
+最多 2000 字符；不接受 `--sent` 回执认领。completed、failed 等其他状态不能
+声明 absent。此命令完全本地执行，不创建网络客户端、不查询消息、不认证、
+不重发，也不会将人工作出的判断伪称为 API 测量结果。
+
+确认操作持有与 send 相同的 request／payload 两把锁，锁内重读状态后，在同一
+事务中保存 `resolved_absent`／`operator_confirmed_absent` 及
+`basis=operator_assertion` 的说明和时间，并追加 `message_resolution` 审计，
+保留完整原状态。原 message_id（若有）、chat_id、UUID、正文哈希、私有原文副本、
+原错误和核验观测均不删除。该本地解除并不证明曾经存在的消息从未被看见。
+
+`resolved_absent` 不再阻拦相同目标／内容的**新逻辑用户请求**；新的发送仍须
+用户明确授权，并单独显式 `send --confirm`。工具绝不自动换 request-id，
+也不自动创建或执行新请求。旧 request-id 始终 no-op，不会再次 POST；
+对已解除动作执行 inspect 也只返回本地回执，不重新查询或改变解除结论。
+稳定 UUID 的服务端幂等期限不是重发保证，仍不提供 same-UUID retry。
+
 ## 群列表、输出与限值
 
 `chats` 仅分页读取机器人可访问的群，返回精确 chat_id／name；重名群保持不同 ID。不会选群、加入群、发送消息或读取群消息内容。请求采用创建时间升序，重复 ID、缺失／重复分页 token 或超出上限明确报错，不把不完整列表当成完整结果。认证 token 请求／LarkCLI 的 bot 探活仍是所选 transport 的必要前置步骤。
 
-CLI 输出 JSON。退出码：0 为 dry-run、已验证完成或群列表完成；2 为参数／本地状态错误或 definite failed；3 为 unknown／verification_pending；130／143 为人工中断／终止。结果包含 action_id、request_id、UUID、原目标与哈希、真实 message_id（若已知）、chat_id 和 verification_status，不返回原始服务响应、访问 token 或 credential 配置。
+CLI 输出 JSON。退出码：0 为 dry-run、已验证完成、群列表完成或 resolved_absent；2 为参数／本地状态错误或发送前 failed；3 为 unknown／verification_pending；130／143 为人工中断／终止。结果包含 action_id、request_id、UUID、原目标与哈希、真实 message_id（若已知）、chat_id、verification_status 及人工 resolution（若有），不返回原始服务响应、访问 token 或 credential 配置。
 
 - request-id：1～200 个 ASCII 字符，可含字母、数字、点、下划线、冒号、斜线、短横线；必须是原始逻辑请求的稳定键。
 - 原文：非空 UTF-8 普通文字，最多 16 KiB，不截断；允许换行／回车／tab，拒绝其他控制字符和已识别的明显凭证。发送为 text JSON，不拼 shell 或模型命令。

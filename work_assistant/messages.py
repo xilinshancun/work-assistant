@@ -80,7 +80,7 @@ def _receipt(record, no_op=False):
     data = record["data"]
     fields = ("request_id", "status", "verification_status", "uuid", "receive_id_type", "receive_id",
               "text_sha256", "target_sha256", "expected_sender_app_id", "message_id", "chat_id",
-              "send_acknowledged", "checks", "error", "verified_at")
+              "send_acknowledged", "checks", "error", "verified_at", "resolution")
     return dict({key: data.get(key) for key in fields}, action_id=record["id"], no_op=no_op)
 
 
@@ -232,9 +232,9 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
                 chat_id = None
             record = _save(store, record, message_id=message_id, chat_id=chat_id, send_acknowledged=True,
                            status="verification_pending", verification_status="verification_pending")
-        except APIError:
-            return _receipt(_save(store, record, status="failed", verification_status="not_sent", error="send_definitely_rejected"))
         except BaseException as exc:
+            # The shared adapter's APIError has no structured guarantee of absence.
+            # Every failure after POST intent is unknown, regardless of error text.
             record = _save(store, record, status="outcome_unknown", verification_status="unresolved",
                            error="send_outcome_unknown; never automatically resend")
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
@@ -251,12 +251,47 @@ def inspect(store, settings, action_id, transport=http, base=BASE, process=None)
         raise MessageError("unknown outgoing message action ID")
     with store.inspection_lock(["message:" + digest(record["data"]["request_id"])]):
         record = _recover(store, store.get(action_id))
-        if not record["data"].get("message_id"):
+        if record["data"]["status"] == "resolved_absent" or not record["data"].get("message_id"):
             return _receipt(record, no_op=True)
         client = make_client(dict(settings), transport=transport, base=base, process=process)
         if client.app_id() != record["data"]["expected_sender_app_id"]:
             raise MessageError("inspect requires the original application identity")
         return _receipt(_readback(store, record, client))
+
+
+def resolve(store, action_id, absent=False, reason=None, confirm=False):
+    """Record an explicit operator assertion locally; never query or resend."""
+    _id(action_id, "action ID")
+    if type(absent) is not bool or not absent or type(confirm) is not bool:
+        raise MessageError("resolve requires explicit --absent; confirm must be boolean")
+    if (type(reason) is not str or not reason.strip() or len(reason) > 2000
+            or any(ord(c) < 32 and c not in "\n\r\t" for c in reason)):
+        raise MessageError("resolve reason must be nonempty text (max 2000 characters), without control characters")
+    record = _find(store, action_id)
+    if record is None:
+        raise MessageError("unknown outgoing message action ID")
+    data = record["data"]
+    resources = ["message:" + digest(data["request_id"]),
+                 "message-payload:" + digest([data["target_sha256"], data["text_sha256"]])]
+    with store.inspection_lock(resources):
+        # Re-read under both send locks: inspection or another resolver may have finished.
+        record = store.get(action_id)
+        data = record["data"]
+        if data["status"] not in {"outcome_unknown", "verification_pending"}:
+            raise MessageError("absent resolution requires outcome_unknown or verification_pending")
+        resolution = {"status": "resolved_absent", "basis": "operator_assertion",
+                      "reason": reason, "prior_status": data["status"]}
+        if not confirm:
+            return dict(_receipt(record), status="dry_run", prior_status=data["status"],
+                        proposed_resolution=resolution, confirm_required=True)
+        resolution["resolved_at"] = now()
+        updated = dict(data, status="resolved_absent", verification_status="operator_confirmed_absent",
+                       resolution=resolution)
+        with store.transaction():
+            store.record("message_resolution", {"action_id": action_id, "resolution": resolution,
+                         "prior_state": data})
+            store.update_record(action_id, updated)
+        return _receipt(store.get(action_id))
 
 
 def chats(settings, transport=http, base=BASE, process=None):
@@ -309,6 +344,11 @@ def parser():
     modes.add_argument("--dry-run", action="store_true")
     command = commands.add_parser("inspect", help="Read the known sent message only; never resend")
     command.add_argument("action_id")
+    command = commands.add_parser("resolve", help="Record operator-confirmed absence locally; never query or resend")
+    command.add_argument("action_id")
+    command.add_argument("--absent", action="store_true", required=True)
+    command.add_argument("--reason", required=True)
+    command.add_argument("--confirm", action="store_true")
     return result
 
 
@@ -322,9 +362,13 @@ def main(argv=None):
             else:
                 store = Store(conf["state_dir"])
                 try:
-                    result = (send(store, conf["publisher"], args.request_id, args.receive_id_type, args.receive_id,
-                                   args.text_file, confirm=args.confirm) if args.command == "send"
-                              else inspect(store, conf["publisher"], args.action_id))
+                    if args.command == "send":
+                        result = send(store, conf["publisher"], args.request_id, args.receive_id_type, args.receive_id,
+                                      args.text_file, confirm=args.confirm)
+                    elif args.command == "resolve":
+                        result = resolve(store, args.action_id, absent=args.absent, reason=args.reason, confirm=args.confirm)
+                    else:
+                        result = inspect(store, conf["publisher"], args.action_id)
                 finally:
                     store.close()
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))

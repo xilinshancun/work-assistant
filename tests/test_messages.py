@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -224,14 +224,150 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(self.send()["status"], "failed")
         self.assertEqual(len(self.transport.calls), count)
 
-    def test_definite_api_rejection_is_failed_but_post_interrupt_is_unknown(self):
-        self.transport.send_error = APIError("synthetic rejected")
-        self.assertEqual(self.send()["status"], "failed")
+    def test_post_api_error_and_interrupt_are_unknown_without_guessing_error_text(self):
+        self.transport.send_error = APIError("synthetic rejected code 400; definitely not sent")
+        result = self.send()
+        self.assertEqual(result["status"], "outcome_unknown")
+        self.assertEqual(result["verification_status"], "unresolved")
+        self.assertNotIn("definitely", result["error"])
+        count = len(self.transport.calls)
+        self.assertTrue(self.send()["no_op"])
+        with self.assertRaisesRegex(messages.MessageError, "unresolved action"):
+            self.send(request="new-key-cannot-guess-absence")
+        self.assertEqual(len(self.transport.calls), count)
         self.transport.send_error = KeyboardInterrupt()
         self.source.write_text("a new explicitly authorized synthetic request")
         with self.assertRaises(KeyboardInterrupt):
             self.send(request="interrupt-fixture")
         self.assertEqual(self.store.get(messages._action_id("interrupt-fixture"))["data"]["status"], "outcome_unknown")
+
+    def test_resolve_absent_dry_run_does_not_change_state_or_contact_network(self):
+        self.transport.send_error = APIError("synthetic uncertain response")
+        action = self.send()
+        before = self.store.records()
+        count = len(self.transport.calls)
+        with patch.dict(os.environ, {}, clear=True), patch.object(messages, "make_client", side_effect=AssertionError("local only")):
+            result = messages.resolve(self.store, action["action_id"], absent=True, reason="Operator checked the synthetic destination.")
+        self.assertEqual(result["status"], "dry_run")
+        self.assertEqual(result["prior_status"], "outcome_unknown")
+        self.assertEqual(result["proposed_resolution"]["basis"], "operator_assertion")
+        self.assertTrue(result["confirm_required"])
+        self.assertEqual(self.store.records(), before)
+        self.assertEqual(len(self.transport.calls), count)
+
+    def test_resolve_absent_keeps_history_and_never_resends_old_request(self):
+        for mode in ("unknown", "known_id"):
+            with self.subTest(mode=mode):
+                request = "resolve-fixture/" + mode
+                self.transport.send_error = APIError("uncertain send") if mode == "unknown" else None
+                self.transport.get_error = APIError("read unavailable")
+                result = self.send(request=request)
+                before = self.store.get(result["action_id"])["data"]
+                source_before = Path(before["source_artifact"]).read_bytes()
+                count = len(self.transport.calls)
+                reason = "操作者已核实合成目标不存在该消息／未投递。"
+                with patch.object(messages, "make_client", side_effect=AssertionError("local only")):
+                    receipt = messages.resolve(self.store, result["action_id"], absent=True, reason=reason, confirm=True)
+                    self.assertEqual(self.inspect(receipt)["status"], "resolved_absent")
+                    repeated = self.send(request=request)
+                self.assertTrue(repeated["no_op"])
+                self.assertEqual(repeated["status"], "resolved_absent")
+                self.assertEqual(receipt["verification_status"], "operator_confirmed_absent")
+                self.assertEqual(receipt["resolution"]["basis"], "operator_assertion")
+                self.assertEqual(receipt["resolution"]["reason"], reason)
+                self.assertEqual(receipt["resolution"]["prior_status"], before["status"])
+                self.assertTrue(receipt["resolution"]["resolved_at"])
+                after = self.store.get(result["action_id"])["data"]
+                for key in set(before) - {"status", "verification_status"}:
+                    self.assertEqual(after[key], before[key], key)
+                self.assertEqual(Path(after["source_artifact"]).read_bytes(), source_before)
+                audit = self.store.records("message_resolution")[0]["data"]
+                self.assertEqual(audit["action_id"], result["action_id"])
+                self.assertEqual(audit["prior_state"], before)
+                self.assertEqual(audit["resolution"], receipt["resolution"])
+                self.assertEqual(len(self.transport.calls), count)
+
+    def test_resolved_absent_unblocks_only_new_explicit_request_without_auto_retry(self):
+        self.transport.send_error = APIError("uncertain send")
+        action = self.send()
+        with self.assertRaisesRegex(messages.MessageError, "unresolved action"):
+            self.send(request="separately-authorized-request")
+        messages.resolve(self.store, action["action_id"], absent=True, reason="Operator checked absence.", confirm=True)
+        count = len(self.transport.calls)
+        self.assertEqual(self.send(request="separately-authorized-request", confirm=False)["status"], "dry_run")
+        self.assertEqual(len(self.transport.calls), count)
+        self.assertEqual(len(self.store.records(messages.KIND)), 1)
+        self.transport.send_error = None
+        receipt = self.send(request="separately-authorized-request")
+        self.assertEqual(receipt["status"], "completed")
+        self.assertNotEqual(receipt["uuid"], action["uuid"])
+        self.assertEqual(len(self.transport.posts()), 2)
+        self.assertEqual(self.store.get(action["action_id"])["data"]["status"], "resolved_absent")
+
+    def test_resolve_rejects_completed_failed_wrong_kind_invalid_reason_and_flags(self):
+        receipt = self.send()
+        for confirm in (False, True):
+            with self.assertRaisesRegex(messages.MessageError, "requires outcome_unknown"):
+                messages.resolve(self.store, receipt["action_id"], absent=True, reason="Checked.", confirm=confirm)
+        self.transport.auth_error = APIError("auth unavailable")
+        self.source.write_text("another synthetic request")
+        failed = self.send(request="failed-auth-fixture")
+        with self.assertRaisesRegex(messages.MessageError, "requires outcome_unknown"):
+            messages.resolve(self.store, failed["action_id"], absent=True, reason="Checked.", confirm=True)
+        for reason in (None, "", " \n\t", 7, "x" * 2001, "bad\x00reason"):
+            with self.subTest(reason=repr(reason)[:30]), self.assertRaisesRegex(messages.MessageError, "reason must"):
+                messages.resolve(self.store, receipt["action_id"], absent=True, reason=reason, confirm=True)
+        for flags in ({"absent": False}, {"absent": 1}, {"absent": True, "confirm": 1}):
+            with self.assertRaises(messages.MessageError):
+                messages.resolve(self.store, receipt["action_id"], reason="Checked.", **flags)
+        wrong = self.store.record("event", {})
+        for ident in (wrong["id"], "message_unknown"):
+            with self.assertRaises(messages.MessageError):
+                messages.resolve(self.store, ident, absent=True, reason="Checked.", confirm=True)
+        self.assertEqual(self.store.records("message_resolution"), [])
+
+    def test_resolve_uses_both_locks_and_rereads_status_under_lock(self):
+        self.transport.send_error = APIError("uncertain send")
+        receipt = self.send()
+        resources = ["message:" + digest(receipt["request_id"]),
+                     "message-payload:" + digest([receipt["target_sha256"], receipt["text_sha256"]])]
+        for resource in resources:
+            with self.store.inspection_lock([resource]), self.assertRaises(Busy):
+                messages.resolve(self.store, receipt["action_id"], absent=True, reason="Checked.", confirm=True)
+        original_lock = self.store.inspection_lock
+        @contextmanager
+        def finish_before_lock(resources):
+            messages._save(self.store, self.store.get(receipt["action_id"]), status="completed")
+            with original_lock(resources):
+                yield
+        with patch.object(self.store, "inspection_lock", finish_before_lock), self.assertRaisesRegex(messages.MessageError, "requires outcome_unknown"):
+            messages.resolve(self.store, receipt["action_id"], absent=True, reason="Checked.", confirm=True)
+        self.assertEqual(self.store.records("message_resolution"), [])
+
+    def test_resolve_audit_and_status_update_are_atomic(self):
+        self.transport.send_error = APIError("uncertain send")
+        receipt = self.send()
+        before = self.store.records()
+        with patch.object(self.store, "update_record", side_effect=OSError("synthetic write failure")), self.assertRaises(OSError):
+            messages.resolve(self.store, receipt["action_id"], absent=True, reason="Checked.", confirm=True)
+        self.assertEqual(self.store.records(), before)
+
+    def test_resolve_cli_local_dry_run_confirm_and_no_sent_adoption(self):
+        self.transport.get_error = APIError("read unavailable")
+        receipt = self.send()
+        path = self.root / "resolve-config.json"
+        path.write_text(dumps({"state_dir": str(self.store.root)}))
+        args = ["--config", str(path), "resolve", receipt["action_id"], "--absent", "--reason", "Operator checked absence."]
+        with patch.dict(os.environ, {}, clear=True), patch.object(messages, "make_client", side_effect=AssertionError("local only")):
+            for confirm, status in (([], "dry_run"), (["--confirm"], "resolved_absent")):
+                with redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(messages.main(args + confirm), 0)
+                self.assertEqual(json.loads(output.getvalue())["status"], status)
+            for invalid in (args + ["--sent"], ["resolve", receipt["action_id"], "--reason", "Checked."],
+                            args[:-1] + [" \t"]):
+                with redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(messages.main(invalid), 2)
+                self.assertEqual(json.loads(output.getvalue())["status"], "failed")
 
     def test_lock_excludes_reentry_before_any_network_or_record(self):
         resources = ["message:" + digest("session-fixture/request-1"),
