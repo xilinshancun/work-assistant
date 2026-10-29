@@ -12,7 +12,7 @@ import sys
 import time
 from .config import load, resolve_path
 from .executors import Providers
-from .inbound_paseo import Paseo, Worktrees, ProtocolError, APP, private_write, read_result
+from .inbound_paseo import Paseo, Worktrees, ProtocolError, QueryError, APP, private_write, read_result
 from .inbound_transport import Consumer, MAX_LINE
 from .lark_cli import LarkCLI
 from .messages import send as send_message, inspect as inspect_message
@@ -24,6 +24,7 @@ from .util import digest, dumps, now, outbound_guard, strict_json
 KIND='inbound_event'
 ACTIVE={'escalating','preparing_workspace','gpt_dispatching','gpt_running','outcome_unknown'}
 RESULT='.wa-inbound-result.json'
+MAX_QUERY_FAILURES=10
 
 
 def ident(app,message):return 'inbound_'+digest([app,message])[:32]
@@ -243,13 +244,26 @@ class Engine:
             return record
         return self.save(record,status='gpt_running',agent_id=bid)
 
+    def readonly_query(self,record,kind,query):
+        try:value=query()
+        except QueryError as exc:
+            count=record['data'].get('query_failure_count',0)+1
+            record=self.save(record,query_failure_count=count,query_last_failure_at=now(),query_failure_kind=kind)
+            if count>=MAX_QUERY_FAILURES:record=self.processing_error(record,exc)
+            return record,None,False
+        record=self.save(record,query_failure_count=0,query_last_success_at=now(),query_failure_kind=None)
+        return record,value,True
+
     def recover_launch(self,record):
-        matches=self.paseo.lookup(record['id'],record['data']['cwd'])
+        record,matches,ok=self.readonly_query(record,'lookup',lambda:self.paseo.lookup(record['id'],record['data']['cwd']))
+        if not ok:return record
         if len(matches)==1:return self.save(record,status='gpt_running',agent_id=matches[0],launch_reconciled=True)
         return self.save(record,status='outcome_unknown' if not matches else 'needs_user',error='launch_label_absent' if not matches else 'multiple_label_matches')
 
     def poll(self,record):
-        data=record['data'];view=self.paseo.inspect(data['agent_id'],data['cwd'])
+        data=record['data']
+        record,view,ok=self.readonly_query(record,'inspect',lambda:self.paseo.inspect(data['agent_id'],data['cwd']))
+        if not ok:return record
         record=self.save(record,agent_observation=view)
         if view['state']=='running':return record
         if view['state']=='needs_user':

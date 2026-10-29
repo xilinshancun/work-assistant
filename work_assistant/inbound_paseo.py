@@ -15,6 +15,10 @@ class ProtocolError(ValueError):
     pass
 
 
+class QueryError(ProtocolError):
+    """A failed read-only CLI query, safe to observe again without new actions."""
+
+
 def private_write(path, raw):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -45,10 +49,17 @@ class Paseo:
         from .process import subprocess_environment
         env,_=subprocess_environment()
         env={k:v for k,v in env.items() if not k.startswith('PASEO_')}
-        result=self.process(self.argv+args,'',cwd=cwd,env=env,inherit_env=False,
-                            timeout=self.settings['cli_timeout'],max_bytes=256*1024)
-        if result.returncode!=0 or result.timed_out or result.truncated or result.invalid_utf8:
-            raise ProtocolError('Paseo command incomplete; inspect original label/ID; never repeat run')
+        try:
+            result=self.process(self.argv+args,'',cwd=cwd,env=env,inherit_env=False,
+                                timeout=self.settings['cli_timeout'],max_bytes=256*1024)
+        except OSError:
+            error=ProtocolError if mutating else QueryError
+            raise error('Paseo command unavailable; preserve original label/ID') from None
+        if result.returncode!=0 or result.timed_out:
+            error=ProtocolError if mutating else QueryError
+            raise error('Paseo command incomplete; preserve original label/ID; never repeat run')
+        if result.truncated or result.invalid_utf8:
+            raise ProtocolError('Paseo returned truncated or invalid UTF-8 structured output')
         try:return strict_json(result.stdout)
         except (ValueError,TypeError,RecursionError):
             raise ProtocolError('Paseo returned malformed structured output') from None

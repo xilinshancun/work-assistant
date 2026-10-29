@@ -104,6 +104,11 @@ proves success: an initial `inspect` must be idle, `wait ID --timeout 1s --json`
 must report idle, and an independent fresh `inspect --json` must again report
 Status=idle and PendingPermissions=[]. Running snapshots return immediately so
 new DS requests do not wait behind the deep agent. Timeouts keep
+waiting without a new prompt. Transient read-only CLI lookup/inspection failures
+retain the original state and record a consecutive count and timestamp. A successful
+query clears the count; only ten consecutive failures consume a diagnostic final.
+Malformed protocol or mismatched agent/workspace identity still stops immediately.
+This read-only recovery never retries `run` or message writes. Agent wait timeouts keep
 waiting without prompts; error/permission states yield needs_user diagnostics,
 never the artifact answer. Missing/invalid final also yields needs_user without
 repair prompts. Full `git status --porcelain=v1 -z --untracked-files=all

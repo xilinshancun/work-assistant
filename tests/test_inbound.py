@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 from work_assistant import inbound, messages
 from work_assistant.config import load
-from work_assistant.inbound_paseo import Paseo, Worktrees, ProtocolError, read_result, private_write
+from work_assistant.inbound_paseo import Paseo, Worktrees, ProtocolError, QueryError, read_result, private_write
 from work_assistant.inbound_transport import Consumer, READY, MAX_LINE
 from work_assistant.process import ProcessResult
 from work_assistant.store import Store, Busy
@@ -166,6 +166,46 @@ class InboundTests(unittest.TestCase):
         done=self.engine.resolve(r['id'],True,'Operator independently confirmed absent')
         self.assertEqual(done['data']['status'],'resolved_absent');self.engine.advance(done)
         self.assertEqual(sum(c[0]=='run' for c in self.paseo.calls),1)
+
+    def test_transient_inspect_failure_keeps_final_free_then_normal_result_once(self):
+        record=self.deep()
+        with patch.object(self.paseo,'inspect',side_effect=[QueryError('temporary read failure'),{'state':'terminal'}]):
+            record=self.engine.advance(record)
+            self.assertEqual(record['data']['status'],'gpt_running');self.assertEqual(record['data']['query_failure_count'],1)
+            self.assertIn('query_last_failure_at',record['data']);self.assertNotIn('final_intent',record['data'])
+            self.assertEqual(len(self.replies),1)
+            record=self.engine.advance(record)
+        self.assertEqual(record['data']['status'],'completed');self.assertEqual(record['data']['query_failure_count'],0)
+        self.assertIn('Synthetic inspection result',self.replies[-1][2]);self.assertEqual(len(self.replies),2)
+        self.engine.advance(record);self.assertEqual(len(self.replies),2)
+        self.assertEqual(sum(c[0]=='run' for c in self.paseo.calls),1)
+
+    def test_transient_lookup_failure_preserves_unknown_then_adopts_original_id(self):
+        self.paseo.crash=ProtocolError('lost launch acknowledgement');record=self.deep()
+        with patch.object(self.paseo,'lookup',side_effect=[QueryError('temporary lookup failure'),['agent_synthetic']]):
+            record=self.engine.advance(record)
+            self.assertEqual(record['data']['status'],'outcome_unknown');self.assertEqual(record['data']['query_failure_count'],1)
+            self.assertNotIn('final_intent',record['data']);self.assertIn('launch_acknowledgement_unknown',record['data']['error'])
+            record=self.engine.advance(record)
+        self.assertEqual(record['data']['status'],'gpt_running');self.assertEqual(record['data']['query_failure_count'],0)
+        done=self.engine.advance(record);self.assertEqual(done['data']['status'],'completed')
+        self.assertEqual(len(self.replies),2);self.assertEqual(sum(c[0]=='run' for c in self.paseo.calls),1)
+
+    def test_ten_consecutive_read_failures_emit_only_one_diagnostic(self):
+        record=self.deep()
+        with patch.object(self.paseo,'inspect',side_effect=QueryError('temporary read failure')):
+            for count in range(1,11):
+                record=self.engine.advance(record)
+                self.assertEqual(record['data']['query_failure_count'],count)
+                self.assertEqual(len(self.replies),1 if count<10 else 2)
+            self.engine.advance(record)
+        self.assertEqual(record['data']['status'],'needs_user');self.assertEqual(len(self.replies),2)
+
+    def test_identity_protocol_mismatch_is_not_classified_as_transient(self):
+        record=self.deep()
+        with patch.object(self.paseo,'inspect',side_effect=ProtocolError('wrong known agent/workspace')):
+            with self.assertRaises(ProtocolError):self.engine.advance(record)
+        self.assertNotIn('query_failure_count',self.store.get(record['id'])['data'])
 
     def test_multiple_label_matches_needs_user(self):
         self.paseo.crash=ProtocolError('lost ack');r=self.deep();self.paseo.matches=['agent_a','agent_b']
@@ -396,6 +436,17 @@ class PaseoProtocolTests(unittest.TestCase):
         argv=self.calls[-1][0]
         self.assertEqual(argv[argv.index('--provider')+1],'codex-b/synthetic-model')
         self.assertEqual(argv[argv.index('--model')+1],'synthetic-model')
+
+    def test_only_readonly_process_failures_are_retryable_not_write_or_bad_protocol(self):
+        self.responses=[ProcessResult('',timed_out=True)]
+        with self.assertRaises(QueryError):self.paseo.lookup('key',self.root)
+        self.responses=[ProcessResult('',timed_out=True)]
+        with self.assertRaises(ProtocolError) as caught:
+            self.paseo.launch('key',self.root,self.root/'request.json',self.root/inbound.RESULT)
+        self.assertNotIsInstance(caught.exception,QueryError)
+        self.responses=[ProcessResult('not structured JSON')]
+        with self.assertRaises(ProtocolError) as caught:self.paseo.lookup('key',self.root)
+        self.assertNotIsInstance(caught.exception,QueryError)
 
     def test_wait_permission_error_timeout_never_terminal_result(self):
         for state,wanted in [('permission','needs_user'),('error','needs_user'),('timeout','running')]:
