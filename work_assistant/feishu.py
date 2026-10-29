@@ -71,14 +71,20 @@ class Feishu:
             raise APIError("invalid receive_id_type")
         return "app:" + digest([self.env("app_id_env"), kind, self.env("receive_id_env"), self.env("folder_token_env", False)])
 
-    def request(self, method, path, body=None):
+    def authenticate(self):
         if not self.token:
-            response = self.transport("POST", self.base + "/auth/v3/tenant_access_token/internal",
-                {"app_id": self.env("app_id_env"), "app_secret": self.env("app_secret_env")}, {})
+            try:
+                response = self.transport("POST", self.base + "/auth/v3/tenant_access_token/internal",
+                    {"app_id": self.env("app_id_env"), "app_secret": self.env("app_secret_env")}, {})
+            except (AmbiguousError, OSError, TimeoutError):
+                raise APIError("tenant authentication failed before any publication request; explicit retry is safe")
             self.check(response)
             self.token = response.get("tenant_access_token")
-            if not self.token:
+            if type(self.token) is not str or not self.token:
                 raise APIError("tenant token missing")
+
+    def request(self, method, path, body=None):
+        self.authenticate()
         if self.transport is http and self.base == BASE:
             # Keep a single CLI process below common docx per-app limits. No automatic mutation retry.
             time.sleep(max(0, 0.4 - (time.monotonic() - self.last_request)))
@@ -128,12 +134,20 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
         if prior and data["mode"] == "webhook" and data.get("hash") != payload["hash"] and data.get("status") == "completed":
             raise ValueError("webhook cannot update prior cards; use app mode for period updates")
         data.update(status="publishing", hash=payload["hash"], report_id=report_id, pending=None)
+        data.pop("error", None)
+        data.pop("authentication_incomplete", None)
         publication = store.record("publication", data, project_id=report["project_id"])
 
         def checkpoint():
             store.update_record(publication["id"], data)
 
         def effect(stage, method, path, body):
+            try:
+                client.authenticate()
+            except BaseException:
+                data["authentication_incomplete"] = True
+                raise
+            data.pop("authentication_incomplete", None)
             data["pending"] = {"stage": stage, "method": method, "path": path, "body_hash": digest(body)}
             checkpoint()  # Write-ahead intent before *each* potential side effect.
             result = client.request(method, path, body)
@@ -200,7 +214,10 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
             data.update(status="failed", error=redact(str(exc)))
             checkpoint()
         except BaseException as exc:
-            data.update(status="outcome_unknown", error="request interrupted or response ambiguous; inspect before retry")
+            if data.get("authentication_incomplete"):
+                data.update(status="failed", pending=None, error="authentication interrupted before any publication request")
+            else:
+                data.update(status="outcome_unknown", error="request interrupted or response ambiguous; inspect before retry")
             checkpoint()
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise

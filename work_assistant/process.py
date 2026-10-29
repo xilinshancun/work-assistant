@@ -4,7 +4,33 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+
+
+class TerminationRequested(KeyboardInterrupt):
+    """SIGTERM requests the same journal/child cleanup as a keyboard interrupt."""
+
+
+class ProcessLaunchError(OSError):
+    """Popen failed before returning a process; no worker was launched."""
+
+
+@contextmanager
+def termination_guard():
+    if not hasattr(signal, "SIGTERM") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    def terminate(signum, frame):
+        # Repeated termination must not interrupt the first signal's cleanup.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        raise TerminationRequested()
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 @dataclass
@@ -15,19 +41,44 @@ class ProcessResult:
     timed_out: bool = False
     truncated: bool = False
     latency_ms: int = 0
+    diagnostics: list = field(default_factory=list)
+
+
+def subprocess_environment(env=None):
+    """Drop only corrupt Paseo metadata; fail before launch on other bad entries."""
+    overlay = os.environ.copy()
+    overlay.update(env or {})
+    diagnostics = []
+    for key, value in list(overlay.items()):
+        if type(key) is not str or type(value) is not str or "\x00" in key or "=" in key or "\x00" in value:
+            raise ProcessLaunchError("invalid environment entry; repair local environment/config before running")
+        try:
+            key.encode("utf-8", "strict")
+            value.encode("utf-8", "strict")
+        except UnicodeEncodeError:
+            if key.startswith("PASEO_"):
+                del overlay[key]
+                safe_key = key.encode("ascii", "backslashreplace").decode("ascii")
+                diagnostics.append("removed non-UTF8 Paseo metadata: " + safe_key)
+            else:
+                safe_key = key.encode("ascii", "backslashreplace").decode("ascii")
+                raise ProcessLaunchError("invalid UTF-8 environment entry: " + safe_key + "; repair local environment/config")
+    return overlay, diagnostics
 
 
 def execute(argv, prompt, cwd, env=None, timeout=600, pass_fds=(), max_bytes=2 * 1024 * 1024):
     if type(argv) is not list or not argv or any(type(a) is not str for a in argv):
         raise ValueError("argv must be a string list")
     started = time.monotonic()
-    overlay = os.environ.copy()
-    overlay.update(env or {})
+    overlay, diagnostics = subprocess_environment(env)
     kwargs = {"cwd": str(cwd), "env": overlay, "stdin": subprocess.PIPE,
               "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "shell": False}
     if os.name == "posix":
         kwargs.update(start_new_session=True, pass_fds=tuple(pass_fds))
-    proc = subprocess.Popen(argv, **kwargs)
+    try:
+        proc = subprocess.Popen(argv, **kwargs)
+    except OSError as exc:
+        raise ProcessLaunchError(str(exc)) from exc
     output = [bytearray(), bytearray()]
     overflow = threading.Event()
 
@@ -98,4 +149,4 @@ def execute(argv, prompt, cwd, env=None, timeout=600, pass_fds=(), max_bytes=2 *
         kill()
         raise
     return ProcessResult(output[0].decode("utf-8", "replace"), output[1].decode("utf-8", "replace"),
-                         proc.returncode, timed_out, overflow.is_set(), round((time.monotonic() - started) * 1000))
+                         proc.returncode, timed_out, overflow.is_set(), round((time.monotonic() - started) * 1000), diagnostics)

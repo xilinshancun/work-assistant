@@ -1,7 +1,7 @@
 {
   "state_dir": ".wa",
   "providers": {
-    "dsh": {"argv": ["dsh"], "env": {}, "timeout": 25},
+    "dsh": {"argv": ["dsh"], "env": {}, "timeout": 25, "patches": []},
     "codex": {"argv": ["codex"], "env": {}, "timeout": 600, "planner_effort": "low", "effort": "medium"},
     "claude_code": {"argv": ["claude"], "env": {}, "timeout": 600}
   },

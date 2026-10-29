@@ -8,7 +8,7 @@ from .util import atomic_write
 DSH_APP = "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
 DEFAULT = {
     "state_dir": ".wa", "providers": {
-        "dsh": {"argv": ["dsh"], "env": {}, "timeout": 25},
+        "dsh": {"argv": ["dsh"], "env": {}, "timeout": 25, "patches": []},
         "codex": {"argv": ["codex"], "env": {}, "timeout": 600, "planner_effort": "low", "effort": "medium"},
         "claude_code": {"argv": ["claude"], "env": {}, "timeout": 600}},
     "publisher": {"mode": "app", "app_id_env": "FEISHU_APP_ID", "app_secret_env": "FEISHU_APP_SECRET",
@@ -41,6 +41,10 @@ def load(path="config.local.json"):
     data["state_dir"] = str(resolve_path(data["state_dir"], path.parent))
     data["ingest_paths"] = [str(resolve_path(p, path.parent)) for p in data["ingest_paths"]]
     for name, conf in data["providers"].items():
+        if name == "dsh":
+            if type(conf["patches"]) is not list or any(type(p) is not str or not p for p in conf["patches"]):
+                raise ValueError("DSH patches must be a list of local paths")
+            conf["patches"] = [str(resolve_path(p, path.parent)) for p in conf["patches"]]
         argv = conf["argv"]
         if type(argv) is not list or not argv or any(type(a) is not str or not a for a in argv):
             raise ValueError("provider argv must be a nonempty string array")

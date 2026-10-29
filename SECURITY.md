@@ -4,6 +4,10 @@
 
 项目默认只授予 `read`，任务默认只读。写任务必须同时具有明确写 intent 和项目 `write_workspace` grant。`publish`、`external` 不在编码执行器权限内；飞书发布由独立 `--confirm` 或精确目的地 grant 授权。模型选择一个 executor 不会改变这些条件。CC 使用 plan+Read/Glob/Grep 或 acceptEdits+有限工具；Codex 使用 read-only/workspace-write。订阅登录保留，不切账号、不使用 bypass 权限。提供商自身的配置、插件和审批规则仍是其安全边界的一部分；这里不是通用的恶意代码隔离器。
 
+Claude 写工具仅 Read/Glob/Grep/Edit/Write，不开放 Bash。可写项目的相同、祖先或子工作区不允许重复注册；执行前也检查旧数据库中的冲突。分类器与 planner 在临时空目录中运行，不读取业务项目的 AGENTS。已启动的写运行只要没有终态成功，就保持 unknown，防止部分写入被当作普通失败重跑。
+
+`protocol_status` 与 `goal_status` 分开：协议完成本身不能证明用户目标实现，未审查结果的目标状态始终是 unverified。只清理非 UTF-8 的无关 `PASEO_*` 元数据并记下键名，不记录坏值；其他损坏的用户环境在启动前报错，凭证与授权不自动替换。DSH 仅过滤已核实的模型列表诊断格式，不能把任意损坏协议行当作日志跳过。
+
 进程启动之前写运行记录，task 和写 workspace 有 SQLite 持久排他记录与 POSIX flock。子进程继承锁句柄，因此父进程崩溃后仍活着的 worker 不会被安全地“过期重试”。没有自动过期重放；核对时必须取得 OS 锁。超时、截断、信号终止或收集失败记录 unknown；未知任务禁止再 route/run。明确的人工作业结果处理有理由和审计事件，不能伪装成独立验证。跟进是新运行记录，并显式复用原 session。
 
 证据复制到本地私有 `.wa/`，记录原始 locator、环境 scope、来源、捕获时间、SHA-256。模型结论默认 reported。measured 等等级由操作者提供并署名；程序只校验源/哈希/结构化数值和单位，不声称自动科学复现。派生结论必须提供公式与输入；输入失效后不进入新报告。历史报告不可修改，跨窗口更正明确显示。

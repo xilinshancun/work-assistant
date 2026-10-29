@@ -1,10 +1,12 @@
 import html
 import json
 import re
+import os
+import tempfile
 from datetime import date
 from pathlib import Path
 from .evidence import verify_evidence
-from .util import dumps, digest, redact, atomic_write, outbound_guard
+from .util import dumps, digest, redact, redact_data, atomic_write, outbound_guard
 
 STYLE = """body{font:16px/1.65 system-ui,sans-serif;color:#172638;background:#f4f6fa;margin:0}main{max-width:960px;margin:auto;padding:24px}section,header{background:white;border-radius:12px;padding:20px;margin-bottom:18px}h1{font-size:28px}h2{font-size:21px}a{color:#225abc}pre{white-space:pre-wrap;overflow-wrap:anywhere}li{margin-bottom:10px;overflow-wrap:anywhere}.meta{color:#526074;font-size:14px}.bar{background:#e1e9f8;height:16px}.bar span{display:block;background:#446bd0;height:16px}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid #ddd}@media(max-width:600px){main{padding:10px}section{padding:14px}}@media print{body{background:white}section{break-inside:avoid}a{color:inherit}}"""
 
@@ -35,7 +37,7 @@ def render(snapshot):
     title = "%s · %s Daily Sync" % (snapshot["project"], snapshot["date"])
     blocks = []
     accomplished = ["%s [%s] %s · %s" % (t["id"], t["status"], t["goal"],
-                    "independently reviewed" if t["verified"] else "unverified") for t in tasks if t["status"] == "completed"]
+                    "independently reviewed" if t["verified"] else "protocol completed; goal unverified") for t in tasks if t["status"] == "completed"]
     numeric = [c for c in claims if c["data"].get("numeric")]
     numbers = ["%s: %s %s [%s; %s; %s]" % (c["data"]["numeric"]["key"], c["data"]["numeric"]["value"],
         c["data"]["numeric"]["unit"], c["id"], c["data"]["grade"], c["data"]["attribution"]) for c in numeric]
@@ -74,7 +76,7 @@ def render(snapshot):
     def page(content):
         return "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>" + escape(title) + "</title><style>" + STYLE + "</style><main>" + content + "</main></html>"
     # Card is a compact native plain-text summary; the full document contains all five blocks.
-    card = {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": redact(title)[:200]}},
+    card = {"config": {"wide_screen_mode": True, "update_multi": True}, "header": {"title": {"tag": "plain_text", "content": redact(title)[:200]}},
             "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": redact(label + "\n" + "\n".join(lines or ["无记录"]))[:1800]}} for label, lines in blocks]}
     card_html = "<header><h1>" + escape(title) + "</h1><p>Feishu native text card · local preview</p><a href='index.html'>完整报告 / Full report</a></header>"
     for component in card["elements"]:
@@ -88,8 +90,12 @@ def render(snapshot):
 def generate_report(store, project, period, output=None, renderer=render):
     date.fromisoformat(period)
     p = store.project(project)
-    with store.claim(["report:" + p["id"]]):
+    # Reports have no external effects. flock releases on SIGKILL; a durable lease
+    # would strand collection despite SQLite rolling back the snapshot/cursor.
+    resource = "report:" + p["id"]
+    with store.inspection_lock([resource]):
         with store.transaction():
+            store.db.execute("DELETE FROM locks WHERE resource=?", (resource,))
             cutoff = store.db.execute("SELECT COALESCE(MAX(seq),0) FROM records").fetchone()[0]
             tasks = store.tasks(p["id"])
             claims = [c for c in store.records("claim", project_id=p["id"], cutoff=cutoff) if c["data"]["status"] == "active"]
@@ -112,7 +118,7 @@ def generate_report(store, project, period, output=None, renderer=render):
             snapshot = {"schema": "wa.report.v1", "project": p["name"], "project_id": p["id"], "date": period,
                 "scope": "all known project facts at snapshot cutoff; corrections included regardless of original period",
                 "tasks": tasks, "claims": claims, "evidence": evidence, "corrections": corrections}
-            outbound = json.loads(redact(dumps(snapshot)))
+            outbound = redact_data(snapshot)
             # Absolute copied artifact locations never leave the private journal.
             for item in outbound["evidence"]:
                 item["data"]["artifact"] = "private artifact (hash verified)"
@@ -140,9 +146,13 @@ def generate_report(store, project, period, output=None, renderer=render):
                     if not (target / name).is_file() or (target / name).read_text(encoding="utf-8") != text:
                         raise ValueError("existing snapshot is incomplete or modified")
             else:
-                target.mkdir(parents=True)
-                for name, text in content.items():
-                    atomic_write(target / name, text)
+                base.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(prefix=".wa-report-", dir=str(base)) as staging:
+                    stage = Path(staging) / "snapshot"
+                    stage.mkdir()
+                    for name, text in content.items():
+                        atomic_write(stage / name, text)
+                    os.replace(str(stage), str(target))
             record = store.record("report", {"hash": content_hash, "path": str(target), "period": period,
                 "cutoff": cutoff, "files": {name: digest(text.encode("utf-8")) for name, text in content.items()}}, project_id=p["id"])
             store.db.execute("INSERT INTO cursors VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET seq=excluded.seq", (p["id"], cutoff))

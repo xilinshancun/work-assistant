@@ -93,6 +93,33 @@ class FeishuTests(Base):
             payload = preview(self.s, self.report["id"])
         self.assertEqual(payload["status"], "dry_run")
         self.assertEqual(self.server.calls, [])
+        self.assertIs(payload["card"]["config"]["update_multi"], True)
+
+    def test_token_network_failure_is_failed_before_sending_pending(self):
+        calls = []
+        def transport(method, url, body, headers):
+            calls.append(url)
+            publication = self.s.records("publication")[0]["data"]
+            self.assertIsNone(publication["pending"])
+            raise AmbiguousError("synthetic token network failure")
+        failed = self.send(transport=transport)
+        self.assertEqual(failed["status"], "failed")
+        self.assertIsNone(failed["pending"])
+        self.assertEqual(failed["steps"], [])
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].endswith("/tenant_access_token/internal"))
+        self.assertEqual(self.server.calls, [])
+        self.assertEqual(self.send(retry=True)["status"], "completed")
+
+    def test_auth_failure_flag_does_not_make_later_send_timeout_retryable(self):
+        def no_token(*args):
+            raise AmbiguousError("synthetic authentication network failure")
+        self.assertEqual(self.send(transport=no_token)["status"], "failed")
+        def card_timeout(method, url, body, headers):
+            if "/im/v1/messages?" in url:
+                raise AmbiguousError("synthetic send timeout")
+            return http(method, url, body, headers)
+        self.assertEqual(self.send(transport=card_timeout, retry=True)["status"], "outcome_unknown")
 
     def test_explicit_authority_create_update_and_noop(self):
         with self.assertRaises(ValueError):

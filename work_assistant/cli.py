@@ -13,7 +13,9 @@ from .evidence import add_evidence, add_claim, change_claim, ingest
 from .reports import generate_report
 from .feishu import preview, publish, reconcile
 from .demo import demo
+from .assistant import ask_task
 from .util import redact
+from .process import termination_guard, TerminationRequested
 
 
 def parser():
@@ -26,6 +28,13 @@ def parser():
     doctor.add_argument("--json", action="store_true")
     d = commands.add_parser("demo")
     d.add_argument("--output", default="out/demo")
+    a = commands.add_parser("ask", help="Create, route and run one task; stops on unresolved outcomes")
+    a.add_argument("project")
+    a.add_argument("goal")
+    a.add_argument("--intent", choices=["read", "write_workspace"], default="read")
+    a.add_argument("--provider", choices=["codex", "claude_code"])
+    a.add_argument("--review", action="store_true")
+    a.add_argument("--report-date")
     project = commands.add_parser("project").add_subparsers(dest="operation", required=True)
     project.add_parser("list")
     a = project.add_parser("add")
@@ -94,6 +103,9 @@ def parser():
 
 def dispatch(args, conf, store):
     c = args.command
+    if c == "ask":
+        return ask_task(store, Providers(conf), args.project, args.goal, args.intent, args.provider,
+                        review=args.review, report_date=args.report_date)
     if c == "project":
         if args.operation == "list":
             return store.projects()
@@ -138,6 +150,11 @@ def dispatch(args, conf, store):
 
 
 def main(argv=None):
+    with termination_guard():
+        return _main(argv)
+
+
+def _main(argv=None):
     args = parser().parse_args(argv)
     try:
         if args.command == "demo":
@@ -160,10 +177,15 @@ def main(argv=None):
         data = result.get("data", result) if isinstance(result, dict) else {}
         if data.get("status") in {"failed", "outcome_unknown", "needs_user"} or (args.command == "route" and data.get("accepted") is False):
             return 2
+        if args.command == "review" and data.get("review_passed") is not True:
+            return 2
         return 0
     except (ValueError, OSError, sqlite3.Error) as exc:
         print("wa: " + redact(str(exc)), file=sys.stderr)
         return 2
-    except KeyboardInterrupt:
-        print("wa: interrupted; inspect journal before another attempt", file=sys.stderr)
+    except TerminationRequested as exc:
+        print("wa: terminated; inspect journal before another attempt" + ("; task_id=" + exc.task_id if hasattr(exc, "task_id") else ""), file=sys.stderr)
+        return 143
+    except KeyboardInterrupt as exc:
+        print("wa: interrupted; inspect journal before another attempt" + ("; task_id=" + exc.task_id if hasattr(exc, "task_id") else ""), file=sys.stderr)
         return 130

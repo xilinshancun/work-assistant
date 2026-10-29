@@ -34,6 +34,24 @@ python3 -m venv .venv
 
 ## 配置和任务
 
+最短真实使用路径（先安装并登录自己要用的提供商；DSH 可选）：
+
+```sh
+python3 -m work_assistant init
+python3 -m work_assistant project add my-project --workspace .
+python3 -m work_assistant ask my-project '只读检查 README 与当前实现的一致性' --provider codex
+```
+
+`ask PROJECT GOAL` 创建一个新任务，复用 task → route → run；输出始终包含已创建的 task_id，遇到 failed/unknown/needs_user 就停止，后续可用 `task show`、`reconcile` 或显式 `run --followup` 继续处理。不会自动发布。需要独立审查时加 `--review`，需要报告时加 `--report-date 2026-01-15`；它们都是可选步骤，前面的步骤不成功就不继续。写入必须显式给出 `--intent write_workspace`，且项目已有对应 grant，ask 不会创建授权。每次 ask 是一次新的用户动作，不会自动重放先前未知运行。
+
+例如完整只读旅程：
+
+```sh
+python3 -m work_assistant ask my-project '检查当前文档并报告可复现的问题' --provider codex --review --report-date 2026-01-15
+```
+
+下面的底层命令仍可逐步使用，便于检查或续接指定任务。
+
 ```sh
 python3 -m work_assistant init
 python3 -m work_assistant doctor --json
@@ -64,9 +82,32 @@ python3 -m work_assistant task add writable-project '在工作区添加合成示
 
 编码进程必须有终态成功才标记 completed。写任务完成时仍未 verified；`review` 用相反提供商以只读权限检查实际工作区、结果和受锁保护的 git diff，保留 host git 观测与模型判断。只有结构化 pass 才设置 independently reviewed；这不是科学复现证明。进程仅启动、exit=0 报错、权限拒绝、没有最终结果都不算成功。CLI 的错误、failed、needs_user、unknown 返回 2，中断返回 130。
 
+`protocol_status=completed` 仅说明提供商协议成功结束；`goal_status=unverified` 表示用户目标尚未独立核验。task 的 completed 是执行阶段状态，模型可能只报告“无法读取文件”，仍必须核查实际产物/运行 review，不能据此声称目标已实现。报告会明确显示 `protocol completed; goal unverified`。review 未通过返回 2；SIGTERM 返回 143。Claude 写任务仅允许 Read/Glob/Grep/Edit/Write，不开放 Bash。两个可写项目不能注册相同或互为祖先的工作区。
+
 配置默认 `config.local.json`，状态默认 `.wa/`，均被忽略。`--config PATH` 放在子命令之前。所有配置相对路径以配置文件所在目录为基准，支持 `~`；`project --workspace` 同样遵循该规则。证据命令中的源路径相对当前工作目录。参考 [合成配置](examples/config.example.json)。可配置每个提供商的 argv 数组、env、timeout、model，Codex 的 planner_effort/executor effort；不拼 shell，不自动切账号。显式本地 `CODEX_HOME` 可绑定已登录账号，仓库不包含个人路径或账号设置。
 
-`doctor` 检测安装与本机 help 能力，不测试登录、不消费模型。macOS 自动发现标准 Applications 下的 DSH。实际协议为 DSH headless JSON、CC print JSON、Codex exec JSONL；实现依据本机 help，详见 [设计规范](PLAN.md)。DSH 分类设置 `DSH_PERMISSION_MODE=read-only`，没有向旧版本传不存在的权限 flags。具体登录/profile overlay 由本机用户维护，不打印完整配置。真实 DSH 的事件格式和认证需安装环境冒烟确认；适配器拒绝缺失 terminal success 的输出。未测 live 时不能将 demo 当作 live 验证。
+`doctor` 检测安装与本机 help 能力，不测试登录、不消费模型。macOS 自动发现标准 Applications 下的 DSH。实际协议为 DSH headless JSON、CC print JSON、Codex exec JSONL；实现依据本机 help，详见 [设计规范](PLAN.md)。DSH 分类设置 `DSH_PERMISSION_MODE=read-only`，没有向旧版本传不存在的权限 flags。classifier/planner 使用临时空工作目录，仅接收任务分类输入；真实项目路径只交给执行器。具体登录/profile overlay 由本机用户维护，不打印完整配置。安装版 DSH 0.2.1-rc.3 源码确认 session 的 `sessionId`、`status.phase=turn_end` 的 `reason.kind=completed` 和最后 `final.text`；三者中终态成功、非空 final 与 exit 0 缺一即拒绝，失败/截断状态不可忽略。成功 fixture 来自安装包协议源码，未声称成功 live 验证；真实认证仍需安装环境冒烟确认。
+
+该安装版可能将一行 `[llm-deepseek-account] model listing from https://api.deepseek.com/models loaded N model(s), skipped N row(s)` 诊断写入 stdout。适配器只过滤这个已实证格式；未知非 JSON 行和损坏 JSON 都拒绝，脱敏原始日志仍保留。Codex 的 item 级开发功能 warning 不等于 turn.failed。
+
+若已登录 DSH 桌面账号，headless profile 却没有凭证服务，可自行创建忽略提交的 `.wa/dsh-desktop-account.yml`：
+
+```yaml
+- id: credentials
+  disabled: false
+- id: authorization
+  disabled: false
+- id: deepseek-account
+  disabled: false
+- id: agent-default-model
+  config:
+    provider: deepseek-account
+    model: deepseek-flash
+```
+
+这是已安装 0.2.1-rc.3 的桌面账号 overlay 示例；`model` 应与自己的桌面选择一致，示例别名不是应用默认值。只在本地 `config.local.json` 的 `providers.dsh` 中添加 `"patches": [".wa/dsh-desktop-account.yml"]`。patch 路径相对配置文件解析；启动时仅通过 `--patch` 临时覆盖，不更改 DSH 用户配置、不附带账号或 API key。不同安装版本需核对本机 help/服务配置，未登录时仍会明确失败并升级 planner。
+
+进程环境保留用户配置与凭证。若继承的 `PASEO_*` 元数据含非 UTF-8 值，会移除这一无效元数据键并记录 diagnostics，避免 Rust CLI 在枚举环境时 panic；其他无效用户环境会在启动前明确报错，不静默改变授权或凭证。
 
 ## 证据、更正与报告
 
@@ -79,7 +120,7 @@ python3 -m work_assistant report my-project --date 2026-01-15
 python3 -m work_assistant publish REPORT_ID --dry-run
 ```
 
-`EVIDENCE_ID`、`CLAIM_ID`、`REPORT_ID` 替换为输出 ID。数字明确与源 JSON `values` 的 value/unit 比对；文本中出现相同数字不等于验证。缺乏数字时不生成虚构百分比。手工等级可选 measured/reproduced/derived/code_observed/reported，并始终保留 attribution 和校验范围。derived 需要 `--derivation '公式' --input CLAIM_ID`；程序检查输入链存在、有效，不执行公式。源文件精确复制、哈希校验，原文件不变。
+`EVIDENCE_ID`、`CLAIM_ID`、`REPORT_ID` 替换为输出 ID。数字明确与源 JSON `values` 的 value/unit 比对；文本中出现相同数字不等于验证。缺乏数字时不生成虚构百分比。手工等级可选 measured/reproduced/derived/code_observed/reported，并始终保留 attribution 和校验范围。derived 需要 `--derivation '公式' --input CLAIM_ID`；程序检查输入链存在、有效，不执行公式。源文件精确复制、哈希校验，原文件不变。报告先递归脱敏字符串再序列化，带引号和反斜杠的模型文本不会破坏 JSON。
 
 `evidence ingest` 只读取配置 `ingest_paths` 中列出的精确文件，不改其他项目的源数据。报告基于有上限的一致性快照，当前实现每个快照最多 1000 条任务/结论/更正/证据，原始文件每份最多 20 MiB，观测预览最多 32 KiB。所有已知事实按新到旧排列；日期是报告归档周期，既有任务与跨周期更正继续显示，并非只截取当天事件。游标记录成功快照的收集边界；新快照保留完整的当前事实和更正，旧快照不可变。文件全部写好后才提交快照/游标；发布失败不影响收集。没有来源的责任人、截止期或承诺不会被自动添加。
 
@@ -108,11 +149,13 @@ python3 -m work_assistant reconcile PUBLICATION_ID --resolution retry_authorized
 python3 -m work_assistant publish REPORT_ID --confirm --retry
 ```
 
-先读 `task show` 的运行记录或 publish 返回的 publication_id。reconcile 不继续 agent，不补发卡片。运行 unknown 只允许有理由的 completed/failed/cancelled 人工处理；该完成记录不可代替真实独立 review。中断的 routing 可用 `reconcile TASK_ID` 检查无活进程后恢复为 needs_user，随后显式 route。发布核对读取已知远端 ID 的元信息与内容；缺失 ID 时请人工核对目标端，用 `--remote-ids '{"document_id":"...","message_id":"...","block_ids":["..."]}'` 提供已查到的对应资源，再决定 completed/retry_authorized/cancelled。不要凭没有本地 ID 推断远端没有效果。
+先读 `task show` 的运行记录或 publish 返回的 publication_id。reconcile 不继续 agent，不补发卡片。写进程已启动但未成功结束，包括部分编辑后的权限拒绝，均进入 unknown；明确没有启动的二进制错误才可直接 failed。Codex 中间命令失败可以由该 turn 恢复，最终 `turn.completed` 成功仍有效；顶层 error/turn.failed 则拒绝。运行 unknown 只允许有理由的 completed/failed/cancelled 人工处理；该完成记录不可代替真实独立 review。中断的 routing 可用 `reconcile TASK_ID` 检查无活进程后恢复为 needs_user，随后显式 route。SIGTERM 会清理所拥有的子进程并保存未知状态；报告只有 OS 锁、整目录原子落盘，被 SIGKILL 后可重新生成，不需要人工解除持久 lease。获取飞书 token 失败发生在写请求之前，记录 failed，可显式 `--retry`；实际发送后的模糊结果仍为 unknown。发布核对读取已知远端 ID 的元信息与内容；缺失 ID 时请人工核对目标端，用 `--remote-ids '{"document_id":"...","message_id":"...","block_ids":["..."]}'` 提供已查到的对应资源，再决定 completed/retry_authorized/cancelled。不要凭没有本地 ID 推断远端没有效果。
 
 ## Paseo 集成与验证范围
 
 不新增 scheduler/daemon，不修改现有 schedules。把已有 Paseo schedule/agent 的工作目录设为本仓库，运行上述一次性 CLI 即可。例如已有每日流程运行 `python3 -m work_assistant report my-project --date YYYY-MM-DD`，读取报告后以 dry-run 检查；若未配置精确发布 grant，则留待用户显式 publish。给调度 agent 的约束示例：“只运行指定项目 report 命令，回传 report ID/路径；发现 unknown 就回报，不自动 resume/retry，不发外部消息。”写任务由用户先建好并授权，调度 agent 只操作明确给出的 task ID。
+
+自然语言入口可按 [Paseo 一次性调用示例](examples/paseo-entry.md) 调用 ask。这只是接入现有 agent/schedule 的操作说明，不代表本工具已接管 Paseo 的会话或调度。
 
 离线 unittest 覆盖严格路由、工具调用升级、一次规划失败、意图/授权不扩大、三种事件解析、进程终止/输出上限、并发与 fencing、证据链和更正、确定性导出、HTML/秘密处理、HTTP 200 应用报错、分步 checkpoint、unknown 核对与 create/update/no-op。测试只监听回环地址，不联系真实服务。macOS/Linux 支持本地任务锁；Windows 暂不支持实际并发运行。真实登录、模型账号权限、安装版本差异和飞书权限需要用户在隔离合成工作区自选进行 live 冒烟，不属于离线通过的证明。
 

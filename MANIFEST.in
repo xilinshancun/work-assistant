@@ -1,0 +1,8 @@
+include README.md LICENSE SECURITY.md PLAN.md AGENTS.md
+include examples/config.example.json
+include examples/sample-observation.json
+include examples/paseo-entry.md
+recursive-include tests test_*.py
+prune .wa
+prune out
+global-exclude *.pyc *.pyo .DS_Store

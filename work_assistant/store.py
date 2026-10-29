@@ -8,7 +8,7 @@ from .util import now, uid, dumps, digest
 
 STATES = {"queued", "routing", "routed", "running", "collecting", "completed", "failed", "needs_user", "outcome_unknown", "cancelled"}
 TRANSITIONS = {
-    "queued": {"routing", "cancelled"}, "routing": {"routed", "needs_user", "outcome_unknown"},
+    "queued": {"routing", "needs_user", "cancelled"}, "routing": {"routed", "needs_user", "outcome_unknown"},
     "routed": {"routing", "running", "needs_user", "cancelled"},
     "running": {"collecting", "failed", "outcome_unknown"},
     "collecting": {"completed", "failed", "outcome_unknown"},
@@ -64,8 +64,19 @@ class Store:
         if type(grants) is not list or any(type(g) is not str or g not in ACTIONS for g in grants):
             raise ValueError("malformed project grants")
         ident = uid("p")
-        self.db.execute("INSERT INTO projects VALUES(?,?,?,?,?)", (ident, name, str(workspace), dumps(grants), now()))
+        with self.transaction():
+            if "write_workspace" in grants:
+                self.check_write_workspace(workspace)
+            self.db.execute("INSERT INTO projects VALUES(?,?,?,?,?)", (ident, name, str(workspace), dumps(grants), now()))
         return self.project(ident)
+
+    def check_write_workspace(self, workspace, project_id=None):
+        workspace = Path(workspace).resolve()
+        for other in self.projects():
+            existing = Path(other["workspace"])
+            if other["id"] != project_id and "write_workspace" in other["grants"] and (
+                    workspace == existing or workspace in existing.parents or existing in workspace.parents):
+                raise ValueError("writable project workspaces must not overlap; existing project: " + other["name"])
 
     def project(self, name):
         row = self.db.execute("SELECT * FROM projects WHERE id=? OR name=?", (name, name)).fetchone()
@@ -93,7 +104,10 @@ class Store:
         row = self.db.execute("SELECT * FROM tasks WHERE id=?", (ident,)).fetchone()
         if not row:
             raise ValueError("unknown task: " + ident)
-        return dict(row)
+        result = dict(row)
+        result["goal_status"] = "independently_reviewed" if result["verified"] else "unverified"
+        result["completion_basis"] = "provider terminal success or audited operator resolution" if result["status"] == "completed" else None
+        return result
 
     def tasks(self, project=None):
         if project:

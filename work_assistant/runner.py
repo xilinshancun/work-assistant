@@ -48,6 +48,9 @@ def run_task(store, providers, task_id, followup=None, review=False, observe=exe
     # Reviews exclude concurrent writes too so the inspected diff cannot race another mutator.
     if action == "write_workspace" or review:
         resources.append("workspace:" + project["workspace"])
+    if action == "write_workspace":
+        # Also catch conflicting projects in databases created by older versions.
+        store.check_write_workspace(project["workspace"], project["id"])
     with store.claim(resources) as (owner, fds):
         with store.transaction():
             fresh = store.task(task_id)
@@ -77,7 +80,12 @@ def run_task(store, providers, task_id, followup=None, review=False, observe=exe
                 data["observation_id"] = observation["id"]
                 prompt += "\nHost observations (git errors mean this is not a git checkout):\n" + dumps(observations)
             result = providers.invoke(provider, prompt, project["workspace"], action=action, session_id=session, pass_fds=fds)
+            if action == "write_workspace" and result["status"] == "failed" and result.get("launched", True):
+                result = dict(result, status="outcome_unknown", error="write run did not complete; effects may already exist: " + result["error"])
             data.update(status=result["status"], result=result)
+            data["protocol_status"] = result.get("protocol_status", result["status"])
+            data["goal_status"] = "unverified"
+            data["completion_basis"] = "provider protocol terminal; goal satisfaction requires separate review"
             log = store.root / "logs" / (run["id"] + ".json")
             atomic_write(log, dumps(result))
             source = add_evidence(store, project["id"], log, "local agent run", origin="agent:" + provider)
@@ -93,6 +101,8 @@ def run_task(store, providers, task_id, followup=None, review=False, observe=exe
                 except ValueError:
                     passed = False
                 data["review_passed"] = passed
+                if passed:
+                    data["goal_status"] = "independently_reviewed"
             with store.transaction():
                 store.update_record(run["id"], data, owner)
                 if review:

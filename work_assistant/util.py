@@ -47,6 +47,17 @@ def redact(text):
     return text
 
 
+def redact_data(value):
+    """Copy a JSON tree, redacting string values before serialization/escaping."""
+    if type(value) is str:
+        return redact(value)
+    if type(value) is dict:
+        return {key: redact_data(item) for key, item in value.items()}
+    if type(value) is list:
+        return [redact_data(item) for item in value]
+    return value
+
+
 def outbound_guard(text):
     if re.search(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", text):
         raise ValueError("outbound material contains an obvious credential; remove it from the source")

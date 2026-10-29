@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 from pathlib import Path
 from work_assistant.config import load
-from work_assistant.process import execute, ProcessResult
+from work_assistant.process import execute, ProcessResult, ProcessLaunchError
 from work_assistant.executors import parse, Providers
 from work_assistant.store import Store, Busy
 from work_assistant.routing import route_task
@@ -73,8 +73,12 @@ class Base(unittest.TestCase):
 
 class ParserTests(unittest.TestCase):
     def test_dsh_terminal_and_tools(self):
-        good = events({"type": "session", "session_id": "dsh1"}, {"type": "text", "text": "hello"}, {"type": "final", "reason": "completed"})
+        # Synthetic projection derived from installed 0.2.1-rc.3 source; not live success.
+        good = events({"type": "session", "sessionId": "dsh1"}, {"type": "text", "text": "hello"},
+                      {"type": "status", "phase": "turn_end", "turn": 1, "reason": {"kind": "completed"}},
+                      {"type": "final", "text": "hello"})
         self.assertEqual(parse("dsh", ProcessResult(good))["status"], "completed")
+        self.assertEqual(parse("dsh", ProcessResult(good))["session_id"], "dsh1")
         for bad in (good.rsplit("\n", 1)[0], good + '\n{"type":"error"}', good[:-2]):
             self.assertEqual(parse("dsh", ProcessResult(bad))["status"], "failed")
         self.assertTrue(parse("dsh", ProcessResult(good + '\n{"type":"tool_call"}'))["tool_calls"])
@@ -108,7 +112,7 @@ class RoutingTests(Base):
         def process(argv, prompt, **kwargs):
             calls.append(argv)
             if argv[0] == "missing-dsh-synthetic":
-                raise FileNotFoundError("synthetic optional binary missing")
+                raise ProcessLaunchError("synthetic optional binary missing")
             return ProcessResult(events({"type": "thread.started", "thread_id": "synthetic"},
                 {"type": "item.completed", "item": {"type": "agent_message", "text": dumps(route_value(ident))}},
                 {"type": "turn.completed"}))

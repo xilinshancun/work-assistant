@@ -26,8 +26,9 @@ def synthetic_process(argv, prompt, cwd, **kwargs):
                  "needs_escalation": complex_task and not planner}
         text = dumps(route)
         if not planner:
-            return ProcessResult('\n'.join(dumps(e) for e in [{"type": "session", "session_id": "synthetic-dsh"},
-                {"type": "text", "text": text}, {"type": "final", "reason": "completed"}]), latency_ms=5)
+            return ProcessResult('\n'.join(dumps(e) for e in [{"type": "session", "sessionId": "synthetic-dsh"},
+                {"type": "text", "text": text}, {"type": "status", "phase": "turn_end", "turn": 1, "reason": {"kind": "completed"}},
+                {"type": "final", "text": text}]), latency_ms=5)
     elif prompt.startswith("Read-only independent review"):
         text = dumps({"verdict": "pass", "reason": "Synthetic review fixture; no live model validation"})
     else:
