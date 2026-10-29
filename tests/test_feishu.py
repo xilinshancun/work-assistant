@@ -156,6 +156,21 @@ class FeishuTests(Base):
         self.assertEqual(self.server.calls, [])
         self.assertIs(payload["card"]["config"]["update_multi"], True)
 
+    def test_layout_transition_lock_blocks_unchanged_and_changed_publish(self):
+        first = self.send()
+        data = self.s.get(first["publication_id"])["data"]
+        data["layout_lock"] = {"kind": "native_tree_transition"}
+        self.s.update_record(first["publication_id"], data)
+        count = len(self.server.calls)
+        with self.assertRaisesRegex(ValueError, "layout is locked"):
+            self.send()
+        self.task()
+        self.report = generate_report(self.s, self.p["id"], "2026-01-15")
+        with self.assertRaisesRegex(ValueError, "layout is locked"):
+            self.send(retry=True)
+        self.assertEqual(len(self.server.calls), count)
+        self.assertEqual(self.s.get(first["publication_id"])["data"], data)
+
     def test_token_network_failure_is_failed_before_sending_pending(self):
         calls = []
         def transport(method, url, body, headers):

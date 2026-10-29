@@ -293,6 +293,8 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
         prior = next((r for r in store.records("publication") if r["data"]["identity"] == identity), None)
         data = dict(prior["data"]) if prior else {"identity": identity, "destination": destination,
             "document_id": None, "block_ids": [], "message_id": None, "mode": settings["mode"], "steps": []}
+        if data.get("layout_lock"):
+            raise ValueError("document layout is locked for an explicit native-tree transition")
         if data.get("status") in {"outcome_unknown", "publishing"}:
             raise ValueError("publication outcome unknown; reconcile before explicit retry")
         if data.get("status") == "completed" and (data.get("hash") == payload["hash"] or
