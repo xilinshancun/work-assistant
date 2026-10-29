@@ -18,6 +18,11 @@ MAX_FILE = 20 * 1024 * 1024
 MAX_SUMMARY = 6000
 BLOCK_TYPES = {"text": 2, **{"heading%s" % level: level + 2 for level in range(1, 7)}, "bullet": 12}
 MAX_NATIVE_TEXT = 10000
+CALLOUTS = {
+    "orange": {"background_color": 2, "border_color": 2, "emoji_id": "writing_hand"},
+    "blue": {"background_color": 5, "border_color": 5, "emoji_id": "bulb"},
+}
+CALLOUT_PREVIEW = {"orange": ("#fff3e8", "#f3a45c"), "blue": ("#eaf2ff", "#80a7ed")}
 SCOPE = ("源报告陈述 / Reported source assertions. 导入仅核对日期、水位和文件哈希；"
          "不代表独立测量或科学复现 / not independently measured or reproduced.")
 
@@ -159,6 +164,15 @@ def coverage_text(start, cutoff, zone_name):
 def native_html(blocks):
     result, in_list = [], False
     for block in blocks:
+        if block["block_type"] == 19:
+            if in_list:
+                result.append("</ul>")
+                in_list = False
+            tone = next(tone for tone, settings in CALLOUTS.items() if settings == block["callout"])
+            background, border = CALLOUT_PREVIEW[tone]
+            result.append("<section class='callout callout-%s' style='background:%s;border:1px solid %s'>%s</section>"
+                          % (tone, background, border, native_html(block["child_blocks"])))
+            continue
         kind = next(key for key, number in BLOCK_TYPES.items() if number == block["block_type"])
         if kind == "bullet" and not in_list:
             result.append("<ul>")
@@ -170,6 +184,15 @@ def native_html(blocks):
         text = element_html(block[kind]["elements"])
         result.append("<%s class='source-line'>%s</%s>" % (tag, text, tag))
     return "".join(result) + ("</ul>" if in_list else "")
+
+
+def text_blocks(blocks):
+    """Walk internal callout children in source order for the local Markdown view."""
+    for block in blocks:
+        if block["block_type"] == 19:
+            yield from text_blocks(block["child_blocks"])
+        else:
+            yield block
 
 
 def _read(root, relative, limit):
@@ -296,6 +319,10 @@ class VisibleReport(HTMLParser):
         first_title = tag == "h1" and not hidden and self._active() and not self.title_seen
         self.title_seen = self.title_seen or first_title
         node = {"tag": tag, "hidden": bool(hidden), "summary": summary, "title": first_title, "children": []}
+        if "data-callout-tone" in attrs:
+            if tag != "section" or attrs["data-callout-tone"] not in CALLOUTS:
+                raise ValueError("data-callout-tone requires section and exactly orange or blue")
+            node["callout_tone"] = attrs["data-callout-tone"]
         if tag == "a":
             node["href"] = attrs.get("href", "").strip()
         (self.stack[-1][4]["children"] if self.stack else self.tree).append(node)
@@ -385,6 +412,7 @@ class VisibleReport(HTMLParser):
         if body_scope == "strict":
             check_outside(self.tree)
         result, summary_parts, summary_elements = [], [], []
+        targets, block_count = [result], 1  # Include the generated coverage block.
         inline_tags = {"strong", "b", "em", "i", "span", "a", "code", "s", "small", "u", "br", "wbr",
                        "mark", "time", "abbr", "kbd", "del", "ins", "label", "var", "samp", "cite", "dfn", "bdi", "bdo"}
         containers = {"main", "section", "article", "header", "footer", "div", "ul", "ol", "li", "dl", "dt", "dd",
@@ -399,6 +427,8 @@ class VisibleReport(HTMLParser):
                          else re.sub(r"\s+", " ", node), style)]
             if node["hidden"]:
                 return []
+            if "callout_tone" in node:
+                raise ValueError("callout must be a block section, not inline content")
             tag = node["tag"]
             if tag not in inline_tags | leaf_blocks | containers | {"td", "th"}:
                 raise ValueError("unsupported HTML element in native content; cannot preserve its semantics")
@@ -429,6 +459,13 @@ class VisibleReport(HTMLParser):
                 runs.extend(child_runs)
             return ([(" | ", {})] if tag in {"td", "th"} else []) + runs
 
+        def append_block(block):
+            nonlocal block_count
+            block_count += 1
+            if block_count > 1000:
+                raise ValueError("document too large; native delivery supports at most 1000 blocks")
+            targets[-1].append(block)
+
         def emit(kind, runs, in_summary=False, preserve=False):
             runs = [(text, style) for text, style in runs if text]
             if not preserve:
@@ -450,20 +487,37 @@ class VisibleReport(HTMLParser):
                 if style:
                     run["text_element_style"] = style
                 elements.append({"text_run": run})
-            result.append({"block_type": BLOCK_TYPES[kind], kind: {"elements": elements}})
+            append_block({"block_type": BLOCK_TYPES[kind], kind: {"elements": elements}})
             if in_summary and kind in {"text", "bullet"}:
                 summary_parts.append(text)
                 summary_elements.append(elements)
-            if len(result) > 999:  # One additional coverage block is generated below.
-                raise ValueError("document too large; native delivery supports at most 1000 blocks")
 
         def walk(node, in_summary=False, inherited_kind="text"):
             if node["hidden"] or node["title"]:
                 return
+            if "callout_tone" in node:
+                if len(targets) > 1:
+                    raise ValueError("nested callouts are unsupported; maximum one callout layer")
+                children = []
+                append_block({"block_type": 19, "callout": dict(CALLOUTS[node["callout_tone"]]),
+                              "child_blocks": children})
+                targets.append(children)
+                try:
+                    walk_content(node, in_summary, inherited_kind)
+                finally:
+                    targets.pop()
+                if not children:
+                    raise ValueError("empty callout is unsupported")
+                return
+            walk_content(node, in_summary, inherited_kind)
+
+        def walk_content(node, in_summary, inherited_kind):
             tag = node["tag"]
             if tag not in containers | leaf_blocks | inline_tags | {"hr"}:
                 raise ValueError("unsupported HTML element in native content; cannot preserve its semantics")
             if tag == "hr":
+                if len(targets) > 1:
+                    raise ValueError("unsupported callout child type: hr")
                 return
             in_summary = in_summary or node["summary"]
             if tag in leaf_blocks:
@@ -587,6 +641,9 @@ def render_import(snapshot):
     evidence_text = "\n".join(evidence_lines)
     coverage_block = {"block_type": 2, "text": {"elements": [{"text_run": {"content": interval}}]}}
     document = {"title": title, "children": [coverage_block] + snapshot["native_blocks"]}
+    if any(block["block_type"] == 19 for block in snapshot["native_blocks"]):
+        document = {"format": "wa.document.tree.v1", "title": title,
+                    "blocks": [coverage_block] + snapshot["native_blocks"]}
     time_hint = cutoff.strftime("截至 %m-%d %H:%M")
     summary_paragraphs = snapshot["summary_paragraphs"]
     lead, bullets = summary_paragraphs[0], summary_paragraphs[1:]
@@ -623,7 +680,7 @@ def render_import(snapshot):
                                  (("#" * (b["block_type"] - 2) + " " if 3 <= b["block_type"] <= 8 else
                                    "- " if b["block_type"] == 12 else "") +
                                   styled_markdown(b[next(k for k, n in BLOCK_TYPES.items() if n == b["block_type"])]["elements"]))
-                                 for b in snapshot["native_blocks"]) + "\n",
+                                 for b in text_blocks(snapshot["native_blocks"])) + "\n",
             "evidence.html": page(header + "<p>" + escape(SCOPE) + "</p><section>" + paragraphs(evidence_text)
                                   + "</section><a href='index.html'>完整报告 / Full report</a>"),
             "evidence.json": dumps(snapshot), "card.json": dumps(card), "document.json": dumps(document),

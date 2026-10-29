@@ -97,6 +97,104 @@ class DailyImportTests(Base):
         blocks = preview(self.s, record["id"])["document"]["children"]
         return "\n".join(daily_import.block_text(b) for b in blocks)
 
+    def test_callout_tree_fixed_tones_preserves_native_leaves_card_and_previews(self):
+        url = "https://github.com/synthetic-org/synthetic-repo/pull/1"
+        deliveries = ('<section data-callout-tone="orange"><h2>交付物</h2><ul>'
+                      '<li><a href="%s"><strong>PR 1</strong></a>：尚未复核。</li>' % url
+                      + ''.join('<li><a href="https://github.com/synthetic-org/synthetic-repo/pull/%s">合成交付物 %s</a>，仅为源陈述。</li>'
+                                % (n, n) for n in range(2, 6))
+                      + '</ul></section>')
+        source = HTML.replace('<main>', '<main>' + deliveries).replace(
+            '<section id="sync-summary">', '<section id="sync-summary" data-callout-tone="blue">').replace(
+            '结论仍有限</strong>。</p>', '结论仍有限</strong>。</p><p>仍需复核。</p><p>尚未完成。</p><p>仅限合成环境。</p>')
+        self.write_bundle(source)
+        report = self.load()
+        files = self.files(report)
+        tree = json.loads(files["document.json"])
+        self.assertEqual(set(tree), {"format", "title", "blocks"})
+        self.assertEqual(tree["format"], "wa.document.tree.v1")
+        orange, blue = tree["blocks"][1:3]
+        self.assertEqual(orange["callout"], {"background_color": 2, "border_color": 2, "emoji_id": "writing_hand"})
+        self.assertEqual(blue["callout"], {"background_color": 5, "border_color": 5, "emoji_id": "bulb"})
+        self.assertEqual([b["block_type"] for b in orange["child_blocks"]], [4] + [12] * 5)
+        self.assertEqual([b["block_type"] for b in blue["child_blocks"]], [4] + [12] * 4)
+        linked = orange["child_blocks"][1]["bullet"]["elements"][0]["text_run"]
+        self.assertTrue(linked["text_element_style"]["bold"])
+        self.assertEqual(unquote(linked["text_element_style"]["link"]["url"]), url)
+        links = [unquote(e["text_run"]["text_element_style"]["link"]["url"])
+                 for block in orange["child_blocks"][1:] for e in block["bullet"]["elements"]
+                 if e["text_run"].get("text_element_style", {}).get("link")]
+        self.assertEqual(links, [url[:-1] + str(n) for n in range(1, 6)])
+        for tone, background, border in (("orange", "#fff3e8", "#f3a45c"), ("blue", "#eaf2ff", "#80a7ed")):
+            self.assertIn("class='callout callout-%s' style='background:%s;border:1px solid %s'" %
+                          (tone, background, border), files["index.html"])
+        self.assertIn('<a href="' + url + '"><strong>PR 1</strong></a>', files["index.html"])
+        self.assertIn("<h2 class='source-line'>交付物</h2><ul><li", files["index.html"])
+        self.assertIn("- **PR 1**：尚未复核。", files["daily-sync.md"])
+        self.assertEqual(self.load()["id"], report["id"])
+        self.write_bundle(source.replace(' data-callout-tone="orange"', '').replace(' data-callout-tone="blue"', ''))
+        flat_files = self.files(self.load())
+        flat = json.loads(flat_files["document.json"])
+        self.assertEqual(set(flat), {"title", "children"})
+        self.assertEqual(list(daily_import.text_blocks(tree["blocks"])), flat["children"])
+        for filename in ("card.json", "card-preview.html", "daily-sync.md"):
+            self.assertEqual(files[filename], flat_files[filename])
+
+    def test_callout_rejects_bad_tone_empty_nested_and_unsupported_content(self):
+        fragments = [
+            ('<section data-callout-tone="green"><p>限定。</p></section>', "exactly orange or blue"),
+            ('<section data-callout-tone=""><p>限定。</p></section>', "exactly orange or blue"),
+            ('<section data-callout-tone="Orange"><p>限定。</p></section>', "exactly orange or blue"),
+            ('<div data-callout-tone="orange">限定。</div>', "requires section"),
+            ('<section data-callout-tone="orange"><p hidden>不可见。</p></section>', "empty callout"),
+            ('<section data-callout-tone="orange"><section data-callout-tone="blue"><p>限定。</p></section></section>', "nested callouts"),
+            ('<section data-callout-tone="blue"><hr></section>', "unsupported callout child"),
+            ('<section data-callout-tone="orange"><p>限定<sup>1</sup>。</p></section>', "unsupported HTML element"),
+            ('<section data-callout-tone="blue"><p>' + '字' * 10001 + '</p></section>', "native block exceeds"),
+        ]
+        for fragment, message in fragments:
+            with self.subTest(fragment=fragment):
+                self.write_bundle(HTML.replace('<main>', '<main>' + fragment))
+                with self.assertRaisesRegex(ValueError, message):
+                    self.load()
+        self.assertEqual(self.s.records("report"), [])
+
+    def test_callout_counts_containers_and_coverage_in_total_block_limit(self):
+        def source(count):
+            return ('<body><h1>合成上限</h1><main><section id="sync-summary"><h2>摘要</h2><p>仅合成。</p></section>'
+                    '<section data-callout-tone="blue">' + '<p>尚未验证。</p>' * count + '</section></main></body>')
+        self.write_bundle(source(996))
+        document = json.loads(self.files(self.load())["document.json"])
+        # 998 leaves + one container + one coverage block = 1000.
+        self.assertEqual(len(list(daily_import.text_blocks(document["blocks"]))), 999)
+        self.write_bundle(source(997))
+        with self.assertRaisesRegex(ValueError, "at most 1000 blocks"):
+            self.load()
+
+    def test_callout_reuses_link_export_checks_and_keeps_local_link_labels(self):
+        fragment = ('<section data-callout-tone="orange"><p><a href="http://localhost:8080/docs">'
+                    '<strong>本地链接标签</strong></a>：仍未完成。</p></section>')
+        self.write_bundle(HTML.replace('<main>', '<main>' + fragment))
+        files = self.files(self.load())
+        self.assertIn("本地链接标签", files["document.json"])
+        self.assertNotIn("localhost", files["document.json"])
+        self.assertIn("<strong>本地链接标签</strong>：仍未完成。", files["index.html"])
+        for href in ("https://example.invalid/docs?path=/Users/synthetic/run.txt",
+                     "https://example.invalid/docs?token=synthetic-private-secret"):
+            self.write_bundle(HTML.replace('<main>', '<main>' + fragment.replace("http://localhost:8080/docs", href)))
+            with self.assertRaises(ValueError):
+                self.load()
+
+    def test_callout_tree_is_rejected_by_flat_publisher_before_network_or_intent(self):
+        self.write_bundle(HTML.replace('<section id="sync-summary">',
+                                       '<section id="sync-summary" data-callout-tone="blue">'))
+        report = self.load()
+        transport = FakeHTTP()
+        with self.assertRaisesRegex(ValueError, "invalid card/document"):
+            publish(self.s, self.conf["publisher"], report["id"], confirm=True, transport=transport)
+        self.assertEqual(transport.calls, [])
+        self.assertEqual(self.s.records("publication"), [])
+
     def test_native_document_headings_bullets_styles_and_single_metadata_title(self):
         source = """<body><header><h1>合成源标题</h1><p>重复覆盖提示</p><nav>顶部导航</nav></header><main>
         <header><p>正文头部提示</p></header><h1>重复正文标题</h1>
