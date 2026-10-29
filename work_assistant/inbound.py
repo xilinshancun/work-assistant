@@ -16,6 +16,7 @@ from .inbound_paseo import Paseo, Worktrees, ProtocolError, QueryError, APP, pri
 from .inbound_transport import Consumer, MAX_LINE
 from .lark_cli import LarkCLI
 from .messages import send as send_message, inspect as inspect_message
+from .message_cards import parse_card
 from .policy import authorize
 from .process import termination_guard
 from .store import Store
@@ -160,16 +161,20 @@ class Engine:
         return raw.decode('utf-8')
 
     def _send(self,request,chat,path):
+        if Path(path).suffix=='.json':
+            return send_message(self.store,self.conf['publisher'],request,'chat_id',chat,None,confirm=True,card_file=path)
         return send_message(self.store,self.conf['publisher'],request,'chat_id',chat,path,confirm=True)
 
-    def reply(self,record,kind,text):
+    def reply(self,record,kind,text,msg_type='text'):
         data=record['data'];field=kind+'_intent'
         if data.get(field):return record  # Host crash before/after send never reposts.
         raw=text.encode('utf-8');outbound_guard(text)
         if len(raw)>16*1024:raise ProtocolError('reply exceeds outgoing bound')
-        path=self.store.root/'inbound'/record['id']/(kind+'.txt');private_write(path,raw)
+        if msg_type not in {'text','interactive'}:raise ProtocolError('unsupported reply format')
+        if msg_type=='interactive':parse_card(text)
+        path=self.store.root/'inbound'/record['id']/(kind+('.json' if msg_type=='interactive' else '.txt'));private_write(path,raw)
         request='inbound:'+record['id']+':'+kind
-        record=self.save(record,**{field:{'request_id':request,'text_hash':digest(raw),'at':now()}})
+        record=self.save(record,**{field:{'request_id':request,'text_hash':digest(raw),'msg_type':msg_type,'at':now()}})
         try:receipt=self.sender(request,data['event']['chat_id'],str(path))
         except BaseException as exc:
             record=self.save(record,**{kind+'_receipt':{'status':'outcome_unknown','verification_status':'unresolved'}})
@@ -178,10 +183,25 @@ class Engine:
         if type(receipt) is not dict:raise ProtocolError('message receipt is invalid; inspect original request ID')
         return self.save(record,**{kind+'_receipt':receipt})
 
-    def final(self,record,text,status='completed'):
-        private_write(self.store.root/'inbound'/record['id']/'final.txt',text.encode('utf-8'))
-        record=self.save(record,status='finalizing',completion_status=status,final_text_hash=digest(text.encode('utf-8')))
-        record=self.reply(record,'final',text)
+    def final(self,record,text,status='completed',title=None,note=None):
+        msg_type='text'
+        if title is not None:
+            text=dumps({'config':{'wide_screen_mode':True},
+                        'header':{'template':'blue','title':{'tag':'plain_text','content':title}},
+                        'elements':[{'tag':'note','elements':[{'tag':'plain_text','content':note}]},
+                                    {'tag':'hr'},{'tag':'div','text':{'tag':'plain_text','content':text}}]})
+            msg_type='interactive'
+        return self._frozen_final(record,text,msg_type,status)
+
+    def _frozen_final(self,record,text,msg_type,status):
+        """Freeze format and exact bytes; recovery never rebuilds a planned payload."""
+        if msg_type not in {'text','interactive'}:raise ProtocolError('unsupported final format')
+        if msg_type=='interactive':parse_card(text)
+        path=self.store.root/'inbound'/record['id']/('final.json' if msg_type=='interactive' else 'final.txt')
+        private_write(path,text.encode('utf-8'))
+        record=self.save(record,status='finalizing',completion_status=status,final_msg_type=msg_type,
+                         final_text_hash=digest(text.encode('utf-8')))
+        record=self.reply(record,'final',text,msg_type)
         receipt=record['data'].get('final_receipt',{})
         verified=receipt.get('status')=='completed' and receipt.get('verification_status')=='verified'
         return self.save(record,status=status if verified else 'final_unknown')
@@ -207,7 +227,7 @@ class Engine:
         except (Exception,):
             decision={'schema':'wa.inbound.v1','decision':'escalate','answer':None,'confidence':0.0,'reason':'classifier_invalid_or_unavailable'}
         record=self.save(record,decision=decision,status='quick_answer' if decision['decision']=='answer' else 'escalating')
-        if decision['decision']=='answer':return self.final(record,'快速回答（未查询项目状态/未执行操作）\n'+decision['answer'])
+        if decision['decision']=='answer':return self.final(record,decision['answer'],title='快速回答',note='未查询项目状态 · 未执行操作')
         return record
 
     def dispatch(self,record):
@@ -276,9 +296,10 @@ class Engine:
         except (ValueError,OSError,UnicodeError):
             return self.final(record,'深度处理已结束，但没有可读且可核对的结果；请查看 agent '+data['agent_id']+'。','needs_user')
         record=self.save(record,status='gpt_done',result_hash=hash_value,unapplied_change_hashes=edits)
-        text='GPT 深度处理结果\n'+value['answer'];status='completed' if value['outcome']=='answered' and not edits else 'needs_user'
-        if edits:text+='\n隔离目录有未应用的改动，未合入。'
-        return self.final(record,text,status)
+        status='completed' if value['outcome']=='answered' and not edits else 'needs_user'
+        note='深度处理已结束 · 未应用改动' if status=='completed' else '需要进一步确认 · 未应用改动'
+        if edits:note='需要进一步确认 · 隔离目录改动未应用、未合入'
+        return self.final(record,value['answer'],status,title='深度分析',note=note)
 
     def advance(self,record):
         data=record['data']
@@ -291,13 +312,15 @@ class Engine:
         if status in {'gpt_dispatching','outcome_unknown'} and data.get('launch_intent') and not data.get('agent_id'):
             return self.recover_launch(record)
         if status=='gpt_running':return self.poll(record)
-        if status=='quick_answer':return self.final(record,'快速回答（未查询项目状态/未执行操作）\n'+record['data']['decision']['answer'])
+        if status=='quick_answer':return self.final(record,record['data']['decision']['answer'],title='快速回答',note='未查询项目状态 · 未执行操作')
         if status=='finalizing':
             if not data.get('final_intent'):
-                path=self.store.root/'inbound'/record['id']/'final.txt'
+                msg_type=data.get('final_msg_type','text')  # Legacy plans stay text, with their original hash.
+                if msg_type not in {'text','interactive'}:raise ProtocolError('unsupported planned final format')
+                path=self.store.root/'inbound'/record['id']/('final.json' if msg_type=='interactive' else 'final.txt')
                 if path.is_symlink() or not path.is_file() or digest(path.read_bytes())!=data.get('final_text_hash'):
                     raise ProtocolError('planned final artifact changed')
-                return self.final(record,path.read_text(encoding='utf-8'),data['completion_status'])
+                return self._frozen_final(record,path.read_bytes().decode('utf-8'),msg_type,data['completion_status'])
             receipt=data.get('final_receipt',{})
             if receipt.get('status')=='completed' and receipt.get('verification_status')=='verified':
                 return self.save(record,status=data['completion_status'])

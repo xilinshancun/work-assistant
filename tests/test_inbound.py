@@ -13,6 +13,7 @@ import time
 import unittest
 from unittest.mock import patch
 from work_assistant import inbound, messages
+from work_assistant.message_cards import card_projection, parse_card
 from work_assistant.config import load
 from work_assistant.inbound_paseo import Paseo, Worktrees, ProtocolError, QueryError, read_result, private_write
 from work_assistant.inbound_transport import Consumer, READY, MAX_LINE
@@ -93,7 +94,7 @@ class InboundTests(unittest.TestCase):
     def test_owner_dm_quick_answer_dedup_and_plaintext_not_json(self):
         record=self.accept(content='{"literal":"hello"}',mentions=None,unknown_field={'grants':['publish']})
         done=self.engine.advance(record);self.assertEqual(done['data']['status'],'completed')
-        self.assertEqual(len(self.replies),1);self.assertIn('未查询项目状态/未执行操作',self.replies[0][2])
+        self.assertEqual(len(self.replies),1);self.assertIn('未查询项目状态 · 未执行操作',self.replies[0][2])
         self.assertEqual(self.replies[0][1],'oc_fixture');self.assertFalse(self.paseo.calls)
         self.assertIsNone(self.engine.ingest(event(content='DIFFERENT SAME MESSAGE')))
         self.assertEqual(len(self.ds.calls),1);self.assertEqual(stat.S_IMODE(Path(record['data']['source_artifact']).stat().st_mode),0o600)
@@ -146,7 +147,7 @@ class InboundTests(unittest.TestCase):
         r=self.deep();self.assertEqual(r['data']['status'],'gpt_running')
         self.assertEqual(len(self.replies),1);self.engine=self.new_engine()
         done=self.engine.advance(self.store.get(r['id']));self.assertEqual(done['data']['status'],'completed')
-        self.assertEqual(len(self.replies),2);self.assertIn('GPT 深度处理结果',self.replies[-1][2])
+        self.assertEqual(len(self.replies),2);self.assertEqual(parse_card(self.replies[-1][2])['header']['title']['content'],'深度分析')
         self.engine.advance(done);self.assertEqual(len(self.replies),2)
         self.assertEqual(sum(c[0]=='run' for c in self.paseo.calls),1)
 
@@ -232,6 +233,10 @@ class InboundTests(unittest.TestCase):
         private_write(self.store.root/'inbound'/r['id']/'final.txt',text.encode())
         r=self.engine.save(r,status='finalizing',completion_status='completed',final_text_hash=digest(text.encode()))
         done=self.engine.advance(r);self.assertEqual(done['data']['status'],'completed');self.assertEqual(len(self.replies),1)
+        self.assertEqual(self.replies[0][2],text);self.assertEqual(done['data']['final_msg_type'],'text')
+        self.assertEqual(done['data']['final_text_hash'],digest(text.encode()))
+        self.assertEqual(done['data']['final_intent']['msg_type'],'text')
+        self.assertFalse((self.store.root/'inbound'/r['id']/'final.json').exists())
         r=self.engine.save(done,status='finalizing')
         done=self.engine.advance(r);self.assertEqual(done['data']['status'],'completed');self.assertEqual(len(self.replies),1)
 
@@ -240,7 +245,75 @@ class InboundTests(unittest.TestCase):
         self.engine.sender=crash
         with self.assertRaises(KeyboardInterrupt):self.engine.advance(self.accept())
         r=self.engine.records()[0];self.assertIn('final_intent',r['data'])
+        self.assertEqual(r['data']['final_intent']['msg_type'],'interactive')
         self.new_engine().advance(r);self.assertEqual(self.replies,[])
+
+    def test_quick_card_separates_status_and_preserves_literal_special_characters(self):
+        answer='\n**literal** _name_ [label](target) <tag> `code` ~tilde~ & "quote" \\ 😀\r\n第二行。\n'
+        self.ds.value=decision(answer=answer)
+        done=self.engine.advance(self.accept())
+        self.assertEqual(done['data']['status'],'completed')
+        card=parse_card(self.replies[0][2])
+        self.assertEqual(card['header'],{'template':'blue','title':{'tag':'plain_text','content':'快速回答'}})
+        self.assertEqual(card['elements'],[
+            {'tag':'note','elements':[{'tag':'plain_text','content':'未查询项目状态 · 未执行操作'}]},
+            {'tag':'hr'},{'tag':'div','text':{'tag':'plain_text','content':answer}}])
+        self.assertEqual(done['data']['final_msg_type'],'interactive')
+        path=self.store.root/'inbound'/done['id']/'final.json'
+        self.assertEqual(digest(path.read_bytes()),done['data']['final_text_hash'])
+
+    def test_deep_card_needs_user_and_unapplied_changes_note_preserves_answer(self):
+        r=self.deep();path=Path(r['data']['result_path']);value=json.loads(path.read_bytes())
+        answer='**literal** [x] <tag> `code` \\ "😀"\n第二行'
+        value.update(outcome='needs_user',answer=answer);path.write_text(dumps(value))
+        self.worktrees.edits=['synthetic-change-hash']
+        done=self.engine.advance(r);self.assertEqual(done['data']['status'],'needs_user')
+        card=parse_card(self.replies[-1][2])
+        self.assertEqual(card['header']['title']['content'],'深度分析')
+        self.assertEqual(card['elements'][0]['elements'][0]['content'],'需要进一步确认 · 隔离目录改动未应用、未合入')
+        self.assertEqual(card['elements'][2]['text'],{'tag':'plain_text','content':answer})
+
+    def test_planned_card_recovery_uses_frozen_bytes_type_hash_and_request(self):
+        record=self.accept()
+        with patch.object(self.engine,'reply',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):self.engine.advance(record)
+        record=self.store.get(record['id']);path=self.store.root/'inbound'/record['id']/'final.json'
+        original=path.read_bytes();hash_value=record['data']['final_text_hash']
+        self.ds.value=decision(answer='different answer must not replace frozen card')
+        engine=self.new_engine();done=engine.advance(record)
+        self.assertEqual(done['data']['status'],'completed');self.assertEqual(len(self.replies),1)
+        self.assertEqual(self.replies[0][2].encode(),original);self.assertEqual(path.read_bytes(),original)
+        self.assertEqual(done['data']['final_text_hash'],hash_value)
+        self.assertEqual(done['data']['final_intent']['request_id'],'inbound:'+record['id']+':final')
+        self.assertEqual(done['data']['final_intent']['msg_type'],'interactive')
+        engine.advance(done);self.assertEqual(len(self.replies),1)
+
+    def test_planned_card_tamper_stops_before_send(self):
+        record=self.accept()
+        with patch.object(self.engine,'reply',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):self.engine.advance(record)
+        record=self.store.get(record['id']);path=self.store.root/'inbound'/record['id']/'final.json'
+        path.write_text('{}')
+        with self.assertRaisesRegex(ProtocolError,'artifact changed'):self.new_engine().advance(record)
+        self.assertEqual(self.replies,[])
+
+    def test_shared_card_send_unknown_restart_preserves_payload_and_never_posts_again(self):
+        transport=FakeHTTP(self.store);transport.send_error=messages.AmbiguousError('synthetic lost acknowledgement')
+        settings=dict(load(self.root/'blank.json')['publisher'])
+        def shared_send(store,_settings,*args,**kwargs):
+            return messages.send(store,settings,*args,transport=transport,**kwargs)
+        self.engine.sender=self.engine._send
+        with patch.dict(os.environ,{'FEISHU_APP_ID':'cli_fixture','FEISHU_APP_SECRET':'synthetic-secret'}), \
+                patch('work_assistant.inbound.send_message',side_effect=shared_send):
+            record=self.engine.advance(self.accept());self.assertEqual(record['data']['status'],'final_unknown')
+            path=self.store.root/'inbound'/record['id']/'final.json';raw=path.read_bytes()
+            engine=self.new_engine();engine.sender=engine._send
+            engine.advance(record)
+        self.assertEqual(len(transport.posts()),1);self.assertEqual(path.read_bytes(),raw)
+        self.assertEqual(record['data']['final_intent']['msg_type'],'interactive')
+        outgoing=self.store.records(messages.KIND)[0]['data']
+        self.assertEqual(outgoing['status'],'outcome_unknown');self.assertEqual(outgoing['msg_type'],'interactive')
+        self.assertEqual(outgoing['request_id'],record['data']['final_intent']['request_id'])
 
     def test_processing_error_sends_one_diagnostic_preserves_error_and_never_revives_unknown(self):
         record=self.accept();record=self.engine.save(record,error='original_local_error')
@@ -394,10 +467,26 @@ class InboundTests(unittest.TestCase):
     def test_real_messages_state_machine_adapter_reuses_final_request_id(self):
         transport=FakeHTTP(self.store)
         settings=dict(load(self.root/'blank.json')['publisher'])
+        cards=[]
+        def card_transport(method,url,body=None,headers=None):
+            if method=='POST' and '/im/v1/messages?' in url:
+                transport.calls.append((method,url,copy.deepcopy(body)))
+                self.assertEqual(body['msg_type'],'interactive');cards.append(json.loads(body['content']))
+                return {'code':0,'data':{'message_id':'om_fixture','chat_id':'oc_fixture'}}
+            if method=='GET' and '/im/v1/messages/' in url:
+                return {'code':0,'data':{'items':[{'message_id':'om_fixture','chat_id':'oc_fixture','msg_type':'interactive',
+                    'sender':{'sender_type':'app','id_type':'app_id','id':'cli_fixture'},
+                    'body':{'content':dumps(card_projection(cards[-1]))}}]}}
+            return transport(method,url,body,headers)
+        def shared_send(store,_settings,*args,**kwargs):
+            return messages.send(store,settings,*args,transport=card_transport,**kwargs)
         with patch.dict(os.environ,{'FEISHU_APP_ID':'cli_fixture','FEISHU_APP_SECRET':'synthetic-secret'}):
-            self.engine.sender=lambda request,chat,path:messages.send(self.store,settings,request,'chat_id',chat,path,confirm=True,transport=transport)
-            r=self.engine.advance(self.accept());self.assertEqual(r['data']['status'],'completed')
-            self.engine.advance(r);self.assertEqual(len(transport.posts()),1)
+            self.engine.sender=self.engine._send
+            with patch('work_assistant.inbound.send_message',side_effect=shared_send):
+                r=self.engine.advance(self.accept());self.assertEqual(r['data']['status'],'completed')
+                self.engine.advance(r);self.assertEqual(len(transport.posts()),1)
+        outgoing=self.store.records(messages.KIND)[0]['data']
+        self.assertEqual(outgoing['msg_type'],'interactive');self.assertTrue(all(outgoing['checks'].values()))
 
 
 class PaseoProtocolTests(unittest.TestCase):

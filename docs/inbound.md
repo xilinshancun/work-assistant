@@ -154,3 +154,19 @@ All automated tests use synthetic events, fake model/CLI/transport fixtures and
 temporary local Git repositories/processes. Installed CLI help/source determines
 the documented protocol, but fixtures are not proof of live subscription,
 permissions, final formatting, delegation or message delivery in your tenant.
+
+New quick/deep answer finals use the shared bounded display-only card path:
+a blue “快速回答” / “深度分析” header, a small gray status note, a divider and
+the original answer in `plain_text` (Markdown symbols are not interpreted).
+Quick notes state that no project state was queried and no operation executed.
+Deep notes distinguish completed analysis from a result needing confirmation;
+isolated unapplied changes are explicitly labeled as not applied or merged.
+Acknowledgements and diagnostics remain text. Existing display-card size/content
+limits and readable-projection GET verification still apply; visual appearance
+is not independently verified by the offline tests.
+
+Before final intent, the exact payload bytes/hash and `final_msg_type` are frozen
+in `final.json` (interactive) or `final.txt` (text). Recovery reads that original
+format rather than rebuilding the card. Legacy plans without `final_msg_type`
+remain text, retaining their bytes/hash and stable `inbound:KEY:final` request ID.
+Interrupted or unknown final intent never automatically resends either format.
