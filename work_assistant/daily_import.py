@@ -1,5 +1,6 @@
 """Import an explicitly selected, validated daily bundle. No providers or network."""
 import html
+import ipaddress
 import os
 import re
 import stat
@@ -74,10 +75,27 @@ def http_link(href):
         target = urlsplit(href)
         if not target.hostname or target.username is not None or target.password is not None:
             raise ValueError()
-    except ValueError:
-        raise ValueError("HTTP link must be absolute and contain no credentials") from None
+        if target.netloc.startswith("[") and ":" not in target.hostname:
+            raise ValueError()  # Python 3.9 does not validate bracket contents itself.
+        target.port  # Validate malformed/out-of-range ports without connecting.
+        hostname = unquote(target.hostname).encode("idna").decode("ascii").lower().rstrip(".")
+    except (ValueError, UnicodeError):
+        raise ValueError("HTTP link must be absolute with a valid port and no credentials") from None
     if any(c.isspace() or ord(c) < 32 for c in href):
         raise ValueError("HTTP link contains unsupported whitespace/control characters")
+    if "%" in hostname:  # Scoped IPv6 or an ambiguously encoded host is machine-local context.
+        return None
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        if ("." not in hostname or hostname.endswith((".localhost", ".local", ".internal"))
+                or not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*", hostname)
+                or re.fullmatch(r"(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*", hostname)):
+            return None
+    else:
+        address = getattr(address, "ipv4_mapped", None) or address
+        if not address.is_global or address.is_multicast:
+            return None
     export_data(href)  # Check the original URL, including query/fragment, before encoding.
     # Official Docx Link.url requires the entire URL to be URL-encoded.
     return {"url": quote(href, safe="")}
