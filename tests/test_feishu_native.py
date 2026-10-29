@@ -20,9 +20,10 @@ def block(kind, content, bold=False):
 
 
 class NativeServer:
-    def __init__(self):
+    def __init__(self, multiple_messages=False):
         self.calls, self.blocks, self.counter, self.revision = [], [], 0, 1
         self.title, self.card = '', None
+        self.multiple_messages, self.messages = multiple_messages, {}
         self.after_append = None
         outer = self
         class Handler(BaseHTTPRequestHandler):
@@ -64,20 +65,29 @@ class NativeServer:
                         data={'document_revision_id':outer.revision}
                     elif path.startswith('/docx/') and self.command=='PATCH':
                         ident=path.rsplit('/',1)[1]
-                        item=next(b for b in outer.blocks if b['block_id']==ident)
-                        item[TEXT_BLOCKS[item['block_type']]]['elements']=copy.deepcopy(body['update_text_elements']['elements'])
+                        if ident=='doc-native':
+                            outer.title=''.join(e['text_run']['content'] for e in body['update_text_elements']['elements'])
+                            item={'block_id':ident,'block_type':1,'page':{'elements':body['update_text_elements']['elements']}}
+                        else:
+                            item=next(b for b in outer.blocks if b['block_id']==ident)
+                            item[TEXT_BLOCKS[item['block_type']]]['elements']=copy.deepcopy(body['update_text_elements']['elements'])
                         outer.revision+=1
                         data={'block':copy.deepcopy(item),'document_revision_id':outer.revision}
                     elif path.endswith('/raw_content'):
                         data={'content':outer.title+'\n'+'\n'.join(''.join(e['text_run']['content'] for e in b[TEXT_BLOCKS[b['block_type']]]['elements']) for b in outer.blocks)}
                     elif path=='/docx/v1/documents/doc-native':
                         data={'document':{'document_id':'doc-native','title':outer.title,'revision_id':outer.revision}}
+                    elif path=='/docx/v1/documents/doc-native/blocks/doc-native':
+                        data={'block':{'block_id':'doc-native','block_type':1,'children':[b['block_id'] for b in outer.blocks],
+                                       'page':{'elements':[{'text_run':{'content':outer.title}}]}}}
                     elif path=='/im/v1/messages' and self.command=='POST':
-                        outer.card=json.loads(body['content']);data={'message_id':'message-native'}
-                    elif path=='/im/v1/messages/message-native' and self.command=='PATCH':
-                        outer.card=json.loads(body['content'])
-                    elif path=='/im/v1/messages/message-native':
-                        data={'items':[{'message_id':'message-native','body':{'content':dumps(outer.card)}}]}
+                        ident='message-native-%s'%(len(outer.messages)+1) if outer.multiple_messages else 'message-native'
+                        outer.card=json.loads(body['content']);outer.messages[ident]=outer.card;data={'message_id':ident}
+                    elif path.startswith('/im/v1/messages/') and self.command=='PATCH':
+                        outer.card=json.loads(body['content']);outer.messages[path.rsplit('/',1)[1]]=outer.card
+                    elif path.startswith('/im/v1/messages/'):
+                        ident=path.rsplit('/',1)[1]
+                        data={'items':[{'message_id':ident,'body':{'content':dumps(outer.messages[ident])}}]}
                     response={'code':0,'data':data}
                 encoded=dumps(response).encode();self.send_response(200);self.send_header('Content-Length',str(len(encoded)));self.end_headers();self.wfile.write(encoded)
             do_GET=do_POST=do_PATCH=do_DELETE=handle_request

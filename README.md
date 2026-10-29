@@ -141,7 +141,7 @@ python3 -m work_assistant publish REPORT_ID --dry-run
 
 将 `REPORT_ID` 换成导入结果的 `id`。真实使用时由用户显式指定自己的 bundle 目录和当天日期；`--timezone` 默认 `Asia/Shanghai`。可用 `--title '合成日报 · 2026-01-15 提前预览'` 覆盖展示标题（非空，最多 200 字符），默认取源 h1；覆盖只改变展示和报告哈希，不修改源文件、正文或日期发布身份。历史归档可显式指定过去日期，不能把旧执行日期冒充今天。重复示例时使用已有项目即可。源 bundle 的结构见 [合成 state](examples/daily-bundle/state.json)、[合成 evidence](examples/daily-bundle/evidence/daily-2026-01-15.json) 和 [合成 HTML](examples/daily-bundle/daily/2026-01-15.html)。
 
-`--title` 可用于首次发布或本地预览。同一目的地＋项目＋周期已经发布后，现有 publisher 不自动修改云文档的 metadata title；后续报告若标题不同，publish 会明确失败并停止文档及消息写入。修订正文或卡片时须沿用已发布标题；云端改名需要另行明确处理，不会通过新建文档或文字消息绕过。
+`--title` 可用于首次发布或本地预览。默认 `per_period` 模式中，同一目的地＋项目＋周期已经发布后，publisher 不自动修改云文档的 metadata title；后续报告若标题不同，publish 会明确失败并停止文档及消息写入。修订正文或卡片时须沿用已发布标题；云端改名需要另行明确处理，不会通过新建文档或文字消息绕过。
 
 bundle 根目录的 `state.json` 提供 `timezone` 以及 `daily.last_report`、`daily.last_evidence`、`daily.last_successful_execution_date`、`daily.covered_until`。两个文件路径在解析符号链接后必须仍位于 bundle 内。evidence 要求 `report_type=daily`，其 `execution_date` 或 `report_date` 至少提供一个，所有已提供的日期、state 的成功执行日期与 `--date` 必须一致；别名同时存在时不允许冲突，不会向源补写字段；两处 timezone 与命令一致；覆盖区间起点早于终点，state/evidence 的终点字符串一致，终点转换到所选时区后的日期必须等于请求日期，不允许未来的终点或执行日期。区间时间戳须有时区偏移，可使用 UTC `Z`。必须提供 `validation.status=passed`，并让 `validation.report_sha256` 等于源 HTML **原始字节**的 SHA-256。缺失、过期、未通过校验、哈希不符或读取期间发生变化均明确报错，不能退回旧日报。
 
@@ -205,6 +205,53 @@ python3 -m work_assistant publish REPORT_ID --confirm
 升级前已完成的同内容报告仍保持 no-op，不因新增按钮而自动改写旧卡片；下一次报告内容变化时再正常更新已有资源并添加按钮。
 
 两个 transport 共用发布和 reconcile 状态机。CLI query 通过 `--params` 传入，JSON body 通过标准输入；原始 CLI 输出和凭证不会进入报告或错误记录。明确的认证、输入、权限拒绝记为 failed；写请求超时、进程中断、5xx 或损坏输出保留 unknown，禁止自动补发。认证探活失败发生在发布写入之前，可检查后显式 `--retry`。同内容仍无请求，变化内容更新已知文档和消息；换 transport 时应用与目的地必须保持一致。离线 FakeCLI 覆盖此协议和故障流程，不代表真实租户验收；live 权限和产物由使用者另行检查。
+
+### 可选：固定文档按日期累积
+
+默认 `publisher.document_layout=per_period` 继续每个周期一份文档。需要同一项目共用一份 Daily Sync 时，在原有应用配置上设置以下字段，或参考 [timeline 配置示例](examples/config.timeline.example.json)。HTTP 与 lark_cli 应用模式均支持；Webhook 不支持 timeline。
+
+```json
+{
+  "document_layout": "timeline",
+  "timeline_title": "Project Daily Sync",
+  "timeline_max_blocks": 3000
+}
+```
+
+此配置由使用者管理，模型输出不能切换布局或创建授权。`timeline_title` 只决定新建固定文档的标题；已有绑定的标题不会随配置或日报标题自动改变。文档每个日期以原生 heading1 开始，最新日期在顶部，保留该日报原有 heading2/heading3、列表和内联样式。同日同类型只 PATCH 签名变化的块；块数、类型或块级样式变化时，仅替换当天区间，保留其他日期的 IDs 与内容。日卡仍按目的地＋项目＋日期建立身份，同日修订复用 message_id，跨日卡片均指向固定文档。日卡标题与固定文档标题独立。
+
+当前实现只维护受管理的直属原生文字块。已有 callout、嵌套子块或额外手工块会拒绝采用或修改，不能用平铺快照覆盖；此类文档需要另行实现并审查树形支持。
+
+已有 `per_period` 文档和卡片必须先明确采用，不能通过切换配置自动复制或新建替代文档：
+
+```sh
+python3 -m work_assistant publish adopt-timeline PUBLICATION_ID --confirm --title 'Project Daily Sync'
+python3 -m work_assistant publish REPORT_ID --confirm
+```
+
+adopt 只接受同一目的地、同一项目的 completed 发布，且原文档所有直属块 ID、内容、样式、标题均与已确认快照一致，没有未完成迁移。它建立本地 `doc_binding`，沿用原 document_id/message_id，不创建文档、卡片或额外分享。省略 `--title` 就保留现有文档标题；提供 `--title` 才执行独立预写、PATCH page block 和 GET 核对。adopt 后第一次正式发布会在原日期正文前补入日期 heading1，仍使用同一文档和卡片。其他旧周期的独立文档不会被自动收集、改写或删除。
+
+需要单独改固定文档标题时使用返回的 binding_record_id：
+
+```sh
+python3 -m work_assistant publish rename-timeline DOC_BINDING_ID --confirm --title 'Project Daily Sync'
+```
+
+日报发布取得共享文档锁和当日卡片锁，并在锁内重载 binding；独立 rename 只需共享文档锁。写入前读取完整根块 IDs，分页核对目标前缀和当天内容/样式；结构多块、少块、乱序或当前日期被人工编辑时返回 needs_user，卡片也不更新。其他日期的文字编辑、样式或评论不被覆盖，也不会仅因此阻止新日期插入。完整同内容 no-op 不发送任何请求；有待处理的未知文档操作则先要求核对。
+
+`timeline_max_blocks` 是本地保守上限，默认 3000，包含结构替换时短暂并存的新旧块；它不是飞书公布的文档容量。达到上限会停止，请自行明确归档或调整本地上限，程序不会自动删历史。根 page block 的 children 使用 API 返回的完整 IDs，并与已知段落拼接及分页前缀交叉核对；不臆造根 ID 数组的分页协议。
+
+新增块按每批至多 50 个插入，写入前持久化 operation、旧/新 IDs、目标快照、索引、client_token 和 body hash，成功后再确认。插入、删除、同类型 PATCH、分享或改名超时/中断均停止，不会借重新导入、取消或下一天调用盲目重发。先只读核对返回的 doc_binding 或 publication：
+
+```sh
+python3 -m work_assistant reconcile DOC_BINDING_ID
+python3 -m work_assistant reconcile DOC_BINDING_ID --resolution retry_authorized --reason '已人工核对目标日期和全部根 IDs'
+python3 -m work_assistant publish REPORT_ID --confirm --retry
+```
+
+reconcile 只发 GET 并记录显式本地决议，不执行远端写入；它能区分已生效/未生效的插入、删除及改名，只有能完整解释的结构才允许继续，不会丢弃部分插入或把未完成日期标为 completed。改名未生效时，核对后仍须显式 `rename-timeline ... --confirm --retry`；不会由普通日报发布代为改名。创建文档或发送卡片未知且缺少 ID 时，需人工提供已查证的 document_id/message_id，或分别使用精确 `document_absent:true`/`message_absent:true` 与 retry_authorized 确认未生效；分享未知沿用精确 `document_member_granted` 人工确认。上述缺失确认均属人工陈述，不能冒充自动独立验证。
+
+读取校验可发现观察时的编辑，但 `document_revision_id` **不是原子 CAS**，GET 与 DELETE/PATCH 之间仍存在外部并发编辑窗口；操作 token 的去重保留期也不作保证。避免与用户同时编辑目标日期；程序不承诺原子地排除飞书客户端编辑。云端操作和可见样式仍需使用者选择专用目的地实际验收，合成 HTTP 测试不能替代 live 结果。
 
 ## 未知结果与恢复
 

@@ -97,7 +97,9 @@ def parser():
     a.add_argument("--body-scope", choices=["strict", "main"], default="strict",
                    help="Explicit main-only export for a verified template; default rejects outside content")
     a = commands.add_parser("publish")
-    a.add_argument("id")
+    a.add_argument("id", help="REPORT_ID, adopt-timeline, or rename-timeline")
+    a.add_argument("target_id", nargs="?", help="publication/binding ID for explicit adopt/rename")
+    a.add_argument("--title", help="explicit canonical document title for adopt/rename only")
     modes = a.add_mutually_exclusive_group()
     modes.add_argument("--dry-run", action="store_true")
     modes.add_argument("--confirm", action="store_true")
@@ -146,6 +148,17 @@ def dispatch(args, conf, store):
         return import_daily(store, args.project, args.source_root, args.date, args.timezone, title=args.title,
                             body_scope=args.body_scope)
     if c == "publish":
+        if args.id in {"adopt-timeline", "rename-timeline"}:
+            if not args.target_id or not args.confirm or args.dry_run:
+                raise ValueError("adopt/rename requires a target ID and explicit --confirm")
+            from .timeline import adopt_timeline, rename_timeline
+            if args.id == "adopt-timeline":
+                if args.retry:
+                    raise ValueError("adoption is not retried; reconcile binding and use rename-timeline if needed")
+                return adopt_timeline(store, conf["publisher"], args.target_id, confirm=True, title=args.title)
+            return rename_timeline(store, conf["publisher"], args.target_id, args.title, confirm=True, retry=args.retry)
+        if args.target_id or args.title is not None:
+            raise ValueError("target ID and --title are only accepted for explicit adopt/rename")
         if args.dry_run or (not args.confirm and not conf["publisher"].get("grants")):
             return preview(store, args.id)
         return publish(store, conf["publisher"], args.id, confirm=args.confirm, retry=args.retry)

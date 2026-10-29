@@ -1,0 +1,16 @@
+{
+  "state_dir": ".wa",
+  "publisher": {
+    "mode": "app",
+    "transport": "http",
+    "document_layout": "timeline",
+    "timeline_title": "Project Daily Sync",
+    "timeline_max_blocks": 3000,
+    "app_id_env": "FEISHU_APP_ID",
+    "app_secret_env": "FEISHU_APP_SECRET",
+    "receive_id_env": "FEISHU_RECEIVE_ID",
+    "receive_id_type": "open_id",
+    "folder_token_env": "FEISHU_FOLDER_TOKEN",
+    "grants": []
+  }
+}

@@ -123,6 +123,17 @@ def migration_observation(store, client, data):
 
 
 def document_settings(settings):
+    layout = settings.get("document_layout", "per_period")
+    if type(layout) is not str or layout not in {"per_period", "timeline"}:
+        raise ValueError("document_layout must be per_period or timeline")
+    if layout == "timeline" and settings.get("mode") != "app":
+        raise ValueError("timeline document layout requires app mode")
+    title = settings.get("timeline_title", "Daily Sync")
+    if type(title) is not str or not title.strip() or len(title) > 200:
+        raise ValueError("timeline_title must be nonempty and at most 200 characters")
+    limit = settings.get("timeline_max_blocks", 3000)
+    if type(limit) is not int or not 1 <= limit <= 100000:
+        raise ValueError("timeline_max_blocks must be a positive local limit up to 100000")
     member_env = settings.get("document_member_env")
     if member_env is not None and (type(member_env) is not str or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", member_env)):
         raise ValueError("document_member_env must be an environment variable name")
@@ -276,7 +287,22 @@ def document_card(card, document_id):
     return card
 
 
+def send_card(client, effect, data, card, settings):
+    if data["message_id"]:
+        effect("update_card", "PATCH", "/im/v1/messages/" + urllib.parse.quote(data["message_id"], safe=""), {"content": dumps(card)})
+    else:
+        message_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, data["identity"] + data["hash"]))
+        result = effect("create_card", "POST", "/im/v1/messages?receive_id_type=" + settings["receive_id_type"],
+            {"receive_id": client.env("receive_id_env"), "msg_type": "interactive", "content": dumps(card), "uuid": message_uuid})
+        data["message_id"] = result.get("message_id")
+        if not data["message_id"]:
+            raise AmbiguousError("send card response missing ID")
+
+
 def publish(store, settings, report_id, confirm=False, transport=http, base=BASE, retry=False, process=None):
+    if settings.get("document_layout", "per_period") == "timeline":
+        from .timeline import publish_timeline
+        return publish_timeline(store, settings, report_id, confirm, transport, base, retry, process)
     payload = preview(store, report_id)
     report_hash = payload["hash"]
     client = make_client(settings, transport, base, process)
@@ -291,6 +317,8 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
     identity = digest([destination, report["project_id"], report["data"]["period"]])
     with store.claim(["publish:" + identity]):
         prior = next((r for r in store.records("publication") if r["data"]["identity"] == identity), None)
+        if prior and prior["data"].get("layout") == "timeline":
+            raise ValueError("publication belongs to a shared timeline; per_period cannot rewrite its document")
         data = dict(prior["data"]) if prior else {"identity": identity, "destination": destination,
             "document_id": None, "block_ids": [], "message_id": None, "mode": settings["mode"], "steps": []}
         if data.get("layout_lock"):
@@ -485,19 +513,8 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
                 data.update(document_payload_hash=document_hash, document_report_id=report_id)
                 checkpoint()
                 card = document_card(payload["card"], data["document_id"])
-                if data["message_id"]:
-                    effect("update_card", "PATCH", "/im/v1/messages/" + urllib.parse.quote(data["message_id"], safe=""),
-                           {"content": dumps(card)})
-                else:
-                    # Feishu documents uuid deduplication for send-message, not for doc creation.
-                    message_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, identity + payload["hash"]))
-                    result = effect("create_card", "POST", "/im/v1/messages?receive_id_type=" + settings["receive_id_type"],
-                                    {"receive_id": client.env("receive_id_env"), "msg_type": "interactive",
-                                     "content": dumps(card), "uuid": message_uuid})
-                    data["message_id"] = result.get("message_id")
-                    if not data["message_id"]:
-                        raise AmbiguousError("send card response missing ID")
-                    checkpoint()
+                send_card(client, effect, data, card, settings)
+                checkpoint()
             data.update(status="completed", pending=None)
             checkpoint()
         except APIError as exc:
@@ -520,6 +537,9 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
 
 def reconcile(store, settings, ident, resolution=None, reason=None, remote_ids=None, transport=http, base=BASE, process=None):
     record = store.get(ident)
+    if record["kind"] == "doc_binding" or (record["kind"] == "publication" and record["data"].get("layout") == "timeline"):
+        from .timeline import reconcile_timeline
+        return reconcile_timeline(store, settings, ident, resolution, reason, remote_ids, transport, base, process)
     if record["kind"] != "publication":
         raise ValueError("expected publication ID")
     data = dict(record["data"])
