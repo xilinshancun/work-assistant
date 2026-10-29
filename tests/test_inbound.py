@@ -21,6 +21,7 @@ from work_assistant.process import ProcessResult
 from work_assistant.store import Store, Busy
 from work_assistant.util import dumps, digest
 from test_messages import FakeHTTP
+from test_reply_messages import FakeReplyHTTP
 from test_runtime import patch_loopback_environment
 
 
@@ -236,6 +237,7 @@ class InboundTests(unittest.TestCase):
         self.assertEqual(self.replies[0][2],text);self.assertEqual(done['data']['final_msg_type'],'text')
         self.assertEqual(done['data']['final_text_hash'],digest(text.encode()))
         self.assertEqual(done['data']['final_intent']['msg_type'],'text')
+        self.assertEqual(done['data']['final_intent']['delivery'],{})
         self.assertFalse((self.store.root/'inbound'/r['id']/'final.json').exists())
         r=self.engine.save(done,status='finalizing')
         done=self.engine.advance(r);self.assertEqual(done['data']['status'],'completed');self.assertEqual(len(self.replies),1)
@@ -262,6 +264,58 @@ class InboundTests(unittest.TestCase):
         path=self.store.root/'inbound'/done['id']/'final.json'
         self.assertEqual(digest(path.read_bytes()),done['data']['final_text_hash'])
 
+    def test_group_ack_is_threaded_but_final_quotes_original_event_not_ack(self):
+        record=self.deep(chat_type='group',content='@bot investigate',mentions=[{'key':'@bot','id':'ou_bot'}],
+                         reply_to_message_id='om_untrusted_override',reply_in_thread=False)
+        ack=record['data']['ack_intent']['delivery']
+        self.assertEqual(ack['reply_to_message_id'],'om_synthetic');self.assertTrue(ack['reply_in_thread'])
+        self.assertEqual(self.replies[0][2],'收到，正在处理；完成后会回复这条消息。')
+        done=self.engine.advance(record)
+        final=done['data']['final_intent']['delivery']
+        self.assertEqual(final['reply_to_message_id'],'om_synthetic');self.assertFalse(final['reply_in_thread'])
+        self.assertEqual(final,done['data']['final_delivery'])
+        self.assertNotIn('worktree',self.replies[0][2])
+
+    def test_p2p_ack_uses_supported_quote_mode_and_quick_final_binds_source(self):
+        record=self.deep()
+        self.assertFalse(record['data']['ack_intent']['delivery']['reply_in_thread'])
+        self.assertEqual(record['data']['ack_intent']['delivery']['thread_policy'],'p2p_supported_quote')
+        done=self.engine.advance(record)
+        self.assertEqual(done['data']['final_delivery']['reply_to_message_id'],'om_synthetic')
+        self.assertFalse(done['data']['final_delivery']['reply_in_thread'])
+
+    def test_old_frozen_text_plan_default_adapter_still_sends_direct_once(self):
+        record=self.accept();text='Legacy frozen complete text'
+        private_write(self.store.root/'inbound'/record['id']/'final.txt',text.encode())
+        record=self.engine.save(record,status='finalizing',completion_status='completed',final_text_hash=digest(text.encode()))
+        transport=FakeHTTP(self.store);settings=dict(load(self.root/'blank.json')['publisher'])
+        def shared_send(store,_settings,*args,**kwargs):
+            self.assertNotIn('reply_to_message_id',kwargs);self.assertNotIn('reply_in_thread',kwargs)
+            return messages.send(store,settings,*args,transport=transport,**kwargs)
+        self.engine.sender=self.engine._send
+        with patch.dict(os.environ,{'FEISHU_APP_ID':'cli_fixture','FEISHU_APP_SECRET':'synthetic-secret'}), \
+                patch('work_assistant.inbound.send_message',side_effect=shared_send):
+            done=self.engine.advance(record);self.engine.advance(done)
+        self.assertEqual(done['data']['status'],'completed');self.assertEqual(len(transport.posts()),1)
+        self.assertIn('/im/v1/messages?',transport.posts()[0][1])
+        self.assertEqual(json.loads(transport.posts()[0][2]['content']),{'text':text})
+
+    def test_old_frozen_card_plan_keeps_direct_mode_after_upgrade(self):
+        record=self.accept()
+        with patch.object(self.engine,'reply',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):self.engine.advance(record)
+        record=self.store.get(record['id']);data=dict(record['data']);data.pop('final_delivery')
+        self.store.update_record(record['id'],data)
+        path=self.store.root/'inbound'/record['id']/'final.json';raw=path.read_bytes()
+        self.engine.sender=self.engine._send
+        with patch('work_assistant.inbound.send_message',return_value={'status':'completed','verification_status':'verified'}) as sender:
+            done=self.engine.advance(self.store.get(record['id']))
+        kwargs=sender.call_args.kwargs
+        self.assertNotIn('reply_to_message_id',kwargs);self.assertNotIn('reply_in_thread',kwargs)
+        self.assertEqual(kwargs['card_file'],str(path));self.assertEqual(path.read_bytes(),raw)
+        self.assertEqual(done['data']['final_text_hash'],data['final_text_hash'])
+        self.assertEqual(done['data']['final_intent']['delivery'],{})
+
     def test_deep_card_needs_user_and_unapplied_changes_note_preserves_answer(self):
         r=self.deep();path=Path(r['data']['result_path']);value=json.loads(path.read_bytes())
         answer='**literal** [x] <tag> `code` \\ "😀"\n第二行'
@@ -286,6 +340,7 @@ class InboundTests(unittest.TestCase):
         self.assertEqual(done['data']['final_text_hash'],hash_value)
         self.assertEqual(done['data']['final_intent']['request_id'],'inbound:'+record['id']+':final')
         self.assertEqual(done['data']['final_intent']['msg_type'],'interactive')
+        self.assertEqual(done['data']['final_intent']['delivery'],record['data']['final_delivery'])
         engine.advance(done);self.assertEqual(len(self.replies),1)
 
     def test_planned_card_tamper_stops_before_send(self):
@@ -301,7 +356,7 @@ class InboundTests(unittest.TestCase):
         answer='参考 https://example.com/guide?a=1&b=2#part\n**原文** _x_ [label] <tag> \\ "😀"'
         self.ds.value=decision(answer=answer)
         expected='【快速回答】\n未查询项目状态 · 未执行操作\n\n'+answer
-        transport=FakeHTTP(self.store);settings=dict(load(self.root/'blank.json')['publisher'])
+        transport=FakeReplyHTTP(self.store,'om_synthetic');settings=dict(load(self.root/'blank.json')['publisher'])
         def shared_send(store,_settings,*args,**kwargs):
             return messages.send(store,settings,*args,transport=transport,**kwargs)
         self.engine.sender=self.engine._send
@@ -353,7 +408,7 @@ class InboundTests(unittest.TestCase):
         self.assertEqual(self.replies,[])
 
     def test_shared_card_send_unknown_restart_preserves_payload_and_never_posts_again(self):
-        transport=FakeHTTP(self.store);transport.send_error=messages.AmbiguousError('synthetic lost acknowledgement')
+        transport=FakeReplyHTTP(self.store,'om_synthetic');transport.send_error=messages.AmbiguousError('synthetic lost acknowledgement')
         settings=dict(load(self.root/'blank.json')['publisher'])
         def shared_send(store,_settings,*args,**kwargs):
             return messages.send(store,settings,*args,transport=transport,**kwargs)
@@ -520,21 +575,10 @@ class InboundTests(unittest.TestCase):
         self.assertEqual(len(created),1)
 
     def test_real_messages_state_machine_adapter_reuses_final_request_id(self):
-        transport=FakeHTTP(self.store)
+        transport=FakeReplyHTTP(self.store,'om_synthetic')
         settings=dict(load(self.root/'blank.json')['publisher'])
-        cards=[]
-        def card_transport(method,url,body=None,headers=None):
-            if method=='POST' and '/im/v1/messages?' in url:
-                transport.calls.append((method,url,copy.deepcopy(body)))
-                self.assertEqual(body['msg_type'],'interactive');cards.append(json.loads(body['content']))
-                return {'code':0,'data':{'message_id':'om_fixture','chat_id':'oc_fixture'}}
-            if method=='GET' and '/im/v1/messages/' in url:
-                return {'code':0,'data':{'items':[{'message_id':'om_fixture','chat_id':'oc_fixture','msg_type':'interactive',
-                    'sender':{'sender_type':'app','id_type':'app_id','id':'cli_fixture'},
-                    'body':{'content':dumps(card_projection(cards[-1]))}}]}}
-            return transport(method,url,body,headers)
         def shared_send(store,_settings,*args,**kwargs):
-            return messages.send(store,settings,*args,transport=card_transport,**kwargs)
+            return messages.send(store,settings,*args,transport=transport,**kwargs)
         with patch.dict(os.environ,{'FEISHU_APP_ID':'cli_fixture','FEISHU_APP_SECRET':'synthetic-secret'}):
             self.engine.sender=self.engine._send
             with patch('work_assistant.inbound.send_message',side_effect=shared_send):

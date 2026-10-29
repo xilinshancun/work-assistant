@@ -172,17 +172,35 @@ class Engine:
         return raw.decode('utf-8')
 
     def _send(self,request,chat,path):
+        _,key,kind=request.split(':')
+        data=self.store.get(key)['data'];intent=data[kind+'_intent']
+        if intent['request_id']!=request or data['event']['chat_id']!=chat:
+            raise ProtocolError('reply intent does not match original inbound chat')
+        delivery=intent.get('delivery',{})  # Old frozen intents retain ordinary send.
+        if delivery and (delivery.get('reply_to_message_id')!=data['event']['message_id']
+                         or type(delivery.get('reply_in_thread')) is not bool):
+            raise ProtocolError('reply delivery must remain bound to the original inbound message')
+        kwargs={key:delivery[key] for key in ('reply_to_message_id','reply_in_thread') if key in delivery}
         if Path(path).suffix=='.json':
-            return send_message(self.store,self.conf['publisher'],request,'chat_id',chat,None,confirm=True,card_file=path)
-        return send_message(self.store,self.conf['publisher'],request,'chat_id',chat,path,confirm=True)
+            return send_message(self.store,self.conf['publisher'],request,'chat_id',chat,None,confirm=True,card_file=path,**kwargs)
+        return send_message(self.store,self.conf['publisher'],request,'chat_id',chat,path,confirm=True,**kwargs)
 
-    def reply(self,record,kind,text,msg_type='text'):
+    def _delivery(self,record,kind):
+        event=record['data']['event']
+        return {'reply_to_message_id':event['message_id'],
+                'reply_in_thread':kind=='ack' and event['chat_type']=='group',
+                'thread_policy':'group_ack_topic' if kind=='ack' and event['chat_type']=='group' else
+                                'p2p_supported_quote' if kind=='ack' else 'original_user_quote'}
+
+    def reply(self,record,kind,text,msg_type='text',delivery=None):
         data=record['data'];field=kind+'_intent'
         if data.get(field):return record  # Host crash before/after send never reposts.
         raw=_reply_bytes(text,msg_type)
+        if delivery is None:delivery=self._delivery(record,kind)
         path=self.store.root/'inbound'/record['id']/(kind+('.json' if msg_type=='interactive' else '.txt'));private_write(path,raw)
         request='inbound:'+record['id']+':'+kind
-        record=self.save(record,**{field:{'request_id':request,'text_hash':digest(raw),'msg_type':msg_type,'at':now()}})
+        record=self.save(record,**{field:{'request_id':request,'text_hash':digest(raw),'msg_type':msg_type,
+                                        'delivery':delivery,'at':now()}})
         try:receipt=self.sender(request,data['event']['chat_id'],str(path))
         except BaseException as exc:
             record=self.save(record,**{kind+'_receipt':{'status':'outcome_unknown','verification_status':'unresolved'}})
@@ -202,16 +220,17 @@ class Engine:
             except ValueError:
                 text='【'+title+'】\n'+note+'\n\n'+text
             else:text=card;msg_type='interactive'
-        return self._frozen_final(record,text,msg_type,status)
+        return self._frozen_final(record,text,msg_type,status,self._delivery(record,'final'))
 
-    def _frozen_final(self,record,text,msg_type,status):
+    def _frozen_final(self,record,text,msg_type,status,delivery=None):
         """Freeze format and exact bytes; recovery never rebuilds a planned payload."""
         raw=_reply_bytes(text,msg_type)
+        if delivery is None:delivery={}
         path=self.store.root/'inbound'/record['id']/('final.json' if msg_type=='interactive' else 'final.txt')
         private_write(path,raw)
         record=self.save(record,status='finalizing',completion_status=status,final_msg_type=msg_type,
-                         final_text_hash=digest(raw))
-        record=self.reply(record,'final',text,msg_type)
+                         final_text_hash=digest(raw),final_delivery=delivery)
+        record=self.reply(record,'final',text,msg_type,delivery=delivery)
         receipt=record['data'].get('final_receipt',{})
         verified=receipt.get('status')=='completed' and receipt.get('verification_status')=='verified'
         return self.save(record,status=status if verified else 'final_unknown')
@@ -244,7 +263,7 @@ class Engine:
         others=[r for r in self.records() if r['id']!=record['id'] and r['data'].get('cwd') and
                 (r['data']['status'] in ACTIVE or r['data'].get('gpt_unresolved'))]
         if others:return self.final(record,'有深度任务进行中，请稍后。','needs_user')
-        record=self.reply(record,'ack','已收到，正在隔离工作区调查；尚未完成或验证结果。')
+        record=self.reply(record,'ack','收到，正在处理；完成后会回复这条消息。')
         data=record['data'];project=self.store.project(self.settings['project_id'])
         root=Path(self.settings['worktree_root']);root.mkdir(parents=True,exist_ok=True,mode=0o700)
         if root.is_symlink():raise ProtocolError('worktree parent cannot be a symlink')
@@ -330,7 +349,8 @@ class Engine:
                 path=self.store.root/'inbound'/record['id']/('final.json' if msg_type=='interactive' else 'final.txt')
                 if path.is_symlink() or not path.is_file() or digest(path.read_bytes())!=data.get('final_text_hash'):
                     raise ProtocolError('planned final artifact changed')
-                return self._frozen_final(record,path.read_bytes().decode('utf-8'),msg_type,data['completion_status'])
+                return self._frozen_final(record,path.read_bytes().decode('utf-8'),msg_type,data['completion_status'],
+                                          delivery=data.get('final_delivery',{}))
             receipt=data.get('final_receipt',{})
             if receipt.get('status')=='completed' and receipt.get('verification_status')=='verified':
                 return self.save(record,status=data['completion_status'])

@@ -21,6 +21,9 @@ from .util import digest, dumps, now, outbound_guard, strict_json
 MAX_TEXT_BYTES = 16 * 1024
 KIND = "outgoing_message"
 UNRESOLVED = {"preparing", "sending", "outcome_unknown", "verification_pending", "needs_user"}
+REPLY_FIELDS = ("reply_to_message_id", "reply_in_thread", "reply_source", "reply_ack_checks",
+                "observed_parent_id", "observed_root_id", "observed_thread_id", "requested_placement",
+                "observed_placement", "placement_matches_request")
 
 
 class MessageError(ValueError):
@@ -62,6 +65,51 @@ def _client(settings, identity, transport, base, process):
     return make_client(dict(settings), transport=transport, base=base, process=process)
 
 
+def _reply_source(client, message_id, chat_id):
+    result = client.request("GET", "/im/v1/messages/" + quote(message_id, safe=""))
+    if type(result) is not dict or type(result.get("items")) is not list or len(result["items"]) != 1:
+        raise MessageError("reply source must be exactly the known message")
+    source = result["items"][0]
+    if (type(source) is not dict or source.get("message_id") != message_id
+            or source.get("chat_id") != chat_id or source.get("deleted", False) is not False):
+        raise MessageError("reply source does not match the original chat/message or was deleted")
+    frozen = {"message_id": message_id, "chat_id": chat_id}
+    for field in ("parent_id", "root_id", "thread_id"):
+        value = source.get(field)
+        frozen[field] = None if value in (None, "") else _id(value, "source " + field,
+            "om_" if field != "thread_id" else "omt_")
+    return frozen
+
+
+def _reply_checks(data, message, readback=False):
+    source = data["reply_source"]
+    # Official replies inside an existing topic point parent/root to the topic
+    # root, including replies to a child. The requested source remains frozen.
+    thread = message.get("thread_id")
+    # false requests may still be placed in a topic by the service. Accept that
+    # placement only with the same exact topic-root/parent/thread relationships.
+    threaded = data["reply_in_thread"] or bool(source.get("thread_id")) or thread not in (None, "")
+    root = (source.get("root_id") or source["message_id"]) if source.get("thread_id") or not threaded else source["message_id"]
+    parent = root if threaded else source["message_id"]
+    valid_thread = type(thread) is str and re.fullmatch(r"omt_[A-Za-z0-9_-]{1,196}", thread) is not None
+    checks = {"reply_parent": message.get("parent_id") == parent,
+              "reply_root": message.get("root_id") == root,
+              "reply_chat": message.get("chat_id") == source["chat_id"],
+              "reply_thread": (valid_thread and (not source.get("thread_id") or thread == source["thread_id"]))
+                              if threaded else thread in (None, "")}
+    if readback:
+        checks["reply_thread"] = bool(checks["reply_thread"] and
+            (None if thread in (None, "") else thread) == data.get("observed_thread_id"))
+    return checks
+
+
+def _placement(message):
+    thread = message.get("thread_id")
+    if thread in (None, ""):
+        return "main"
+    return "thread" if type(thread) is str and re.fullmatch(r"omt_[A-Za-z0-9_-]{1,196}", thread) else "unknown"
+
+
 def _text_file(path):
     with os.fdopen(os.open(str(Path(path).expanduser()), os.O_RDONLY | os.O_NONBLOCK), "rb") as source:
         if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
@@ -100,7 +148,7 @@ def _receipt(record, no_op=False):
     fields = ("request_id", "status", "verification_status", "uuid", "receive_id_type", "receive_id",
               "text_sha256", "target_sha256", "expected_sender_app_id", "message_id", "chat_id",
               "send_acknowledged", "checks", "error", "verified_at", "resolution", "msg_type", "verification_scope",
-              "operation", "update_parent", "superseded_by", "pending", "expected_sender_user_open_id")
+              "operation", "update_parent", "superseded_by", "pending", "expected_sender_user_open_id") + REPLY_FIELDS
     return dict({key: data.get(key) for key in fields}, identity=data.get("identity", "bot"), action_id=record["id"], no_op=no_op)
 
 
@@ -185,19 +233,28 @@ def _readback(store, record, client, persist=True):
                   "not_deleted": message.get("deleted", False) is False}
         if card is None:
             checks["text"] = checks.pop("content")
+        if data.get("reply_to_message_id"):
+            checks.update(_reply_checks(data, message, readback=True))
+            checks["reply_acknowledgement"] = bool(data.get("reply_ack_checks")) and all(data["reply_ack_checks"].values())
         verified = all(checks.values())
         indistinguishable = (data.get('operation') == 'update_card' and bool(data.get('pending'))
                              and data.get('previous_projection_hash') == digest(card_projection(card))) if card else False
         if indistinguishable:
             verified = False
         scope = "readable_card_content_identity_and_chat; URLs/styles retained in sent payload, not independently verified by GET" if card is not None else "exact_text_identity_and_chat"
+        if data.get("reply_to_message_id"):
+            scope += "; original_reply_parent_root_and_thread"
+        placement = {}
+        if data.get("reply_to_message_id"):
+            placement = {"observed_placement": _placement(message),
+                         "placement_matches_request": _placement(message) == data["requested_placement"]}
         record = save(checks=checks, status="needs_user" if indistinguishable else "completed" if verified else "verification_pending",
                        verification_status="verified" if verified else "verification_pending",
                        error="readable projections indistinguishable; URL/style update outcome cannot be proved by GET" if indistinguishable else None if verified else "readback_does_not_match_expected_message",
                        verified_at=now() if verified else None, verification_scope=scope,
                        **({"pending": None} if verified and data.get("operation") == "update_card" else {}),
                        readback_create_time=message.get("create_time"), card_update_multi=card["config"].get("update_multi") if card else None,
-                       readable_card_hash=digest(card_projection(card)) if card else None)
+                       readable_card_hash=digest(card_projection(card)) if card else None, **placement)
     except BaseException as exc:
         record = save(status="verification_pending", verification_status="verification_pending",
                        error="readback_unavailable_or_invalid; known sent ID retained; inspect only", verified_at=None, checks={})
@@ -211,7 +268,8 @@ def _readback(store, record, client, persist=True):
 
 
 def send(store, settings, request_id, receive_id_type, receive_id, text_file, confirm=False,
-         transport=http, base=BASE, process=None, card_file=None, identity="bot"):
+         transport=http, base=BASE, process=None, card_file=None, identity="bot",
+         reply_to_message_id=None, reply_in_thread=False):
     """One explicit user request. Reentry never performs a second POST."""
     _settings(settings)
     owner = _identity(settings, identity)
@@ -221,6 +279,14 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
     if type(receive_id_type) is not str or receive_id_type not in {"chat_id", "open_id"}:
         raise MessageError("receive-id-type must be chat_id or open_id")
     _id(receive_id, "receive-id", "oc_" if receive_id_type == "chat_id" else "ou_")
+    if type(reply_in_thread) is not bool:
+        raise MessageError("reply-in-thread must be an explicit boolean")
+    if reply_to_message_id is not None:
+        _id(reply_to_message_id, "reply source message ID", "om_")
+        if identity != "bot" or receive_id_type != "chat_id":
+            raise MessageError("reply currently requires bot identity and an explicit chat_id")
+    elif reply_in_thread:
+        raise MessageError("reply-in-thread requires a reply source message ID")
     if (text_file is None) == (card_file is None):
         raise MessageError("provide exactly one text-file or card-file")
     text, raw = _text_file(card_file if card_file is not None else text_file)
@@ -230,7 +296,8 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
         raise MessageError("card-file must be a supported display-only card") from None
     msg_type = "interactive" if card is not None else "text"
     ident = _action_id(request_id)
-    target_hash, text_hash = digest([receive_id_type, receive_id]), digest(raw)
+    target_hash = digest(["reply", receive_id, reply_to_message_id, reply_in_thread]) if reply_to_message_id else digest([receive_id_type, receive_id])
+    text_hash = digest(raw)
     resource = "message:" + digest(request_id)
     payload_resource = "message-payload:" + digest([target_hash, text_hash])
     with store.inspection_lock([resource, payload_resource]):
@@ -239,6 +306,8 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
                        or record["data"]["text_sha256"] != text_hash or record["data"].get("msg_type", "text") != msg_type
                        or record["data"].get("operation", "send") != "send"
                        or record["data"].get("identity", "bot") != identity
+                       or record["data"].get("reply_to_message_id") != reply_to_message_id
+                       or record["data"].get("reply_in_thread", False) != reply_in_thread
                        or (identity == "user" and record["data"].get("expected_sender_user_open_id") != owner)):
             raise MessageError("request-id already belongs to different target/content; do not replace it")
         if not confirm:
@@ -246,7 +315,9 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
                     "receive_id_type": receive_id_type, "receive_id": receive_id,
                     "text": text, "text_sha256": text_hash, "target_sha256": target_hash,
                     "prior_status": record["data"]["status"] if record else None, "confirm_required": True, "msg_type": msg_type,
-                    "identity": identity, "expected_sender_user_open_id": owner}
+                    "identity": identity, "expected_sender_user_open_id": owner,
+                    "reply_to_message_id": reply_to_message_id, "reply_in_thread": reply_in_thread,
+                    "requested_placement": ("thread" if reply_in_thread else "main") if reply_to_message_id else None}
         if record:
             return _receipt(_recover(store, record), no_op=True)
         for prior in store.records(KIND):
@@ -260,6 +331,8 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
         with store.transaction():
             record = store.record(KIND, {"schema": "wa.message.v1", "request_id": request_id,
                 "identity": identity, "expected_sender_user_open_id": owner,
+                "reply_to_message_id": reply_to_message_id, "reply_in_thread": reply_in_thread,
+                "requested_placement": ("thread" if reply_in_thread else "main") if reply_to_message_id else None,
                 "receive_id_type": receive_id_type, "receive_id": receive_id, "target_sha256": target_hash,
                 "text_sha256": text_hash, "source_artifact": artifact, "msg_type": msg_type,
                 "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, "wa.outgoing-message:" + request_id)),
@@ -277,11 +350,26 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             return _receipt(record)
+        if reply_to_message_id:
+            try:
+                source = _reply_source(client, reply_to_message_id, receive_id)
+                record = _save(store, record, reply_source=source)
+            except BaseException as exc:
+                record = _save(store, record, status="failed", verification_status="not_sent",
+                               error="reply_source_preflight_failed; no reply request started")
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                return _receipt(record)
         record = _save(store, record, status="sending", verification_status="unresolved")
         try:
             body = {"receive_id": receive_id, "msg_type": msg_type, "content": dumps(card if card is not None else {"text": text}),
                     "uuid": record["data"]["uuid"]}
-            result = client.request("POST", "/im/v1/messages?" + urlencode({"receive_id_type": receive_id_type}), body)
+            path = "/im/v1/messages?" + urlencode({"receive_id_type": receive_id_type})
+            if reply_to_message_id:
+                body.pop("receive_id")
+                body["reply_in_thread"] = reply_in_thread
+                path = "/im/v1/messages/" + quote(reply_to_message_id, safe="") + "/reply"
+            result = client.request("POST", path, body)
             if type(result) is not dict:
                 raise AmbiguousError("invalid send acknowledgement")
             message_id = result.get("message_id")
@@ -290,7 +378,16 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
             chat_id = result.get("chat_id") if receive_id_type == "open_id" else receive_id
             if type(chat_id) is not str or not re.fullmatch(r"oc_[A-Za-z0-9_-]{1,200}", chat_id):
                 chat_id = None
+            relations = {}
+            if reply_to_message_id:
+                relations["reply_ack_checks"] = _reply_checks(record["data"], result)
+                relations["observed_placement"] = _placement(result)
+                relations["placement_matches_request"] = _placement(result) == record["data"]["requested_placement"]
+                for field in ("parent_id", "root_id", "thread_id"):
+                    value = result.get(field)
+                    relations["observed_" + field] = value if type(value) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", value) else None
             record = _save(store, record, message_id=message_id, chat_id=chat_id, send_acknowledged=True,
+                           **relations,
                            status="verification_pending", verification_status="verification_pending")
         except BaseException as exc:
             # The shared adapter's APIError has no structured guarantee of absence.
@@ -346,6 +443,7 @@ def update_card(store, settings, action_id, request_id, card_file, confirm=False
                     "card": card, "confirm_required": True}
         artifact = _persist_text(store, ident, raw)
         data = {key: old[key] for key in ("receive_id_type", "receive_id", "target_sha256", "expected_sender_app_id", "message_id", "chat_id")}
+        data.update({key: old[key] for key in REPLY_FIELDS if key in old})
         data.update(schema="wa.message.v1", operation="update_card", update_parent=action_id,
                     request_id=request_id, uuid=str(uuid.uuid5(uuid.NAMESPACE_URL, "wa.update-card:" + request_id)),
                     msg_type="interactive", text_sha256=text_hash, source_artifact=artifact, status="preparing",
@@ -549,6 +647,8 @@ def parser():
     command.add_argument("--receive-id-type", choices=["chat_id", "open_id"], required=True)
     command.add_argument("--receive-id", required=True)
     command.add_argument("--identity", choices=["bot", "user"], default="bot", help="Explicit user OAuth messages only; default bot")
+    command.add_argument("--reply-to-message-id", "--reply-to", dest="reply_to_message_id", help="Known source message to quote/reply to; bot and chat_id only")
+    command.add_argument("--reply-in-thread", action="store_true", help="Reply in the source topic; requires --reply-to")
     files = command.add_mutually_exclusive_group(required=True)
     files.add_argument("--text-file")
     files.add_argument("--card-file", help="Display-only interactive card JSON; no callbacks or forms")
@@ -587,7 +687,8 @@ def main(argv=None):
                 try:
                     if args.command == "send":
                         result = send(store, conf["publisher"], args.request_id, args.receive_id_type, args.receive_id,
-                                      args.text_file, confirm=args.confirm, card_file=args.card_file, identity=args.identity)
+                                      args.text_file, confirm=args.confirm, card_file=args.card_file, identity=args.identity,
+                                      reply_to_message_id=args.reply_to_message_id, reply_in_thread=args.reply_in_thread)
                     elif args.command == "resolve":
                         result = resolve(store, args.action_id, absent=args.absent, reason=args.reason, confirm=args.confirm)
                     elif args.command == "update-card":

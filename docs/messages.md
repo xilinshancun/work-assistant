@@ -32,6 +32,38 @@ python3 -m work_assistant.messages --config private/config.local.json inspect AC
 
 ## 去重、回执与恢复
 
+### 原生引用与话题回复（仅 bot）
+
+`send` 可显式增加 `--reply-to-message-id om_synthetic_source`（别名
+`--reply-to`），并继续提供原会话的 `--receive-id-type chat_id --receive-id
+oc_synthetic_chat`。默认 `reply_in_thread=false` 请求原生引用；增加
+`--reply-in-thread` 请求话题回复。本轮不支持 user 身份或 open_id 目的地的
+reply；省略这些参数仍是原普通 send，既有记录无需迁移。
+
+确认后先认证，再 GET 精确来源 message，核对同一 chat、未删除及可用关系字段，
+只冻结来源 ID/chat/parent/root/thread，不复制其正文。来源不可用、跨 chat 或已删除，
+在任何回复 POST 前失败。实际使用
+`POST /im/v1/messages/{source}/reply`，body 仅含 `content` JSON 字符串、
+`msg_type`、精确 bool `reply_in_thread` 和稳定 UUID；不传 receive_id，
+也不调用普通 send 作为失败后的替代路径。目标 hash 绑定
+`["reply", chat, source, bool]`；同 request-id 不能改来源、模式或改为普通发送。
+
+已冻结 source 无 thread 时，false 回复期望 parent=source、root=来源 root
+（未提供则为 source），且无 thread；true 回复期望 parent=root=source，
+并在 POST 回执中记录非空 `omt_...` thread，GET 必须回读同值。
+source 已有 thread 时，无论请求 bool，期望 parent=root=话题根，thread
+保持来源 thread；回复子消息时不能要求 parent=子消息 ID。
+false 也接受服务端强制生成的话题：parent=root=source，thread 必须为有效
+`omt_...`，POST 和 GET 中的 thread 必须一致；不能只凭出现 thread 就放宽关系。
+身份、chat、内容和上述关系均匹配才完成，错误/缺失字段保留已知 ID 并 pending。
+
+`requested_placement` 记录请求的 main/thread，`observed_placement` 记录实际
+GET 中的 main/thread，`placement_matches_request` 单独表示是否一致。
+投递 verified 不等于“必定显示在主聊天”：来源已在话题内时，false 也可能
+留在话题；给原消息创建话题后再 false 的真实落点须以实际回读为准。
+落点差异不能触发重发。POST 的 230071 等拒绝、缺 message_id、超时和其他错误
+一律保留 unknown，不自动重放、改发普通消息或创建新 request-id。
+
 request-id 在共享 journal 内全局绑定原始目标类型／ID 和精确内容哈希，不按项目、日期或 worker 分开。相同 request-id 改目标或正文会拒绝；相同请求已完成则返回原 action_id、message_id 和核验结果，零发送请求。每个动作在任何发送之前生成并保存一个稳定 UUID（36 字符）、模式 0600 的原文字节副本及目标／内容哈希。不会把模型输出字段当成授权。
 
 发送在 request 锁及相同目标／内容的锁内执行：先认证，再持久写入 `sending`，最后才 POST。POST 阶段的所有 APIError、超时、断连、损坏响应、缺 message_id 或进程中断均保守记为 `outcome_unknown`。公共 adapter 的 APIError 没有结构化的“未生效”保证，因此不解析错误字符串猜测状态码或声称消息明确未发送。重启看见残留 `sending` 只恢复成 unknown，不重发。认证失败且尚未进入 sending 时仍为 `failed`／`not_sent`，因为消息 POST 尚未开始。没有 retry 命令：同一个 failed 请求也不会因重复 confirm 自动重试。

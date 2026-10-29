@@ -176,3 +176,23 @@ in `final.json` (interactive) or `final.txt` (text). Recovery reads that origina
 format rather than rebuilding the card. Legacy plans without `final_msg_type`
 remain text, retaining their bytes/hash and stable `inbound:KEY:final` request ID.
 Interrupted or unknown final intent never automatically resends either format.
+
+New reply intents pin the trusted event's original `message_id` and chat, never a
+model-selected message or the ack's ID. Group acknowledgements request a topic
+reply; p2p acknowledgements use the supported non-threaded quote path. The text is
+“收到，正在处理；完成后会回复这条消息。”, without internal workspace details.
+Quick, deep and clarification finals request a native quote of the original user
+message with `reply_in_thread=false`. The shared messages adapter verifies the
+source by GET before POST, journals its relationships and verifies the returned
+parent/root/thread alongside identity, chat and content. Reply failure never
+falls back to ordinary chat send.
+
+Requested main/thread placement and observed placement are separate receipts.
+An existing topic can force a false reply to remain inside it; creating a topic
+for an ack can affect the subsequent final's placement. Synthetic protocol tests
+do not prove live visual placement, and no main-chat guarantee is claimed before
+deployment validation. Such a difference is recorded, never repaired by reposting.
+The planned final freezes `final_delivery` with the payload format/hash; the
+send intent stores that same delivery context. Legacy frozen plans/intents without
+delivery fields retain their original ordinary-send behavior. Completed/unknown
+old actions are not migrated or replayed.
