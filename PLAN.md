@@ -142,7 +142,11 @@ inside ROOT after symlink resolution, and all inputs are re-read before committi
 Evidence execution_date/report_date aliases require at least one and must agree.
 Optional source_mapping preserves section-to-existing-source-ID arrays as reported
 without inventing claims; missing items becomes an empty list. Missing source summary
-uses an explicit local UI placeholder, while id/verified_at remain required and raw
+uses an explicit local UI placeholder; ordinary source id remains required, while
+missing verified_at displays "源未提供验证时间 / Not supplied" locally without
+fabricating a date. Present source timestamps must be nonempty bounded text, PR
+observation timestamps remain required, and sources stay reported. Instruction-only
+sources do not create completed tasks or business claims. Raw
 source metadata stays private. Source mappings may also reference PR observations
 with required id/verified_at, with duplicate IDs rejected within/across both sets.
 Local evidence distinguishes source/pr_observation kinds; full PR metadata stays

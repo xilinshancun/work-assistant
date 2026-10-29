@@ -11,7 +11,7 @@ from unittest.mock import patch
 from work_assistant import daily_import
 from work_assistant.daily_import import import_daily
 from work_assistant.feishu import AmbiguousError, preview, publish, reconcile
-from work_assistant.reports import load_report
+from work_assistant.reports import generate_report, load_report
 from work_assistant.util import digest, dumps
 from test_runtime import Base
 
@@ -241,7 +241,7 @@ class DailyImportTests(Base):
                     self.load()
         self.assertEqual(self.s.records("report"), [])
 
-    def test_optional_summary_is_validated_when_present_verified_at_still_required(self):
+    def test_optional_summary_is_validated_when_present_source_verified_at_optional(self):
         for summary in (None, "", "字" * 2001, 123):
             with self.subTest(summary=summary):
                 self.evidence["sources"][0]["summary"] = summary
@@ -251,8 +251,46 @@ class DailyImportTests(Base):
         del self.evidence["sources"][0]["summary"]
         del self.evidence["sources"][0]["verified_at"]
         self.write_metadata()
-        with self.assertRaisesRegex(ValueError, "source verified_at"):
-            self.load()
+        self.assertIn("源未提供验证时间 / Not supplied", self.files(self.load())["evidence.html"])
+
+    def test_instruction_source_without_verified_at_stays_reported_and_private(self):
+        instruction = {"id": "s_instruction", "post_cutoff_instruction_only": True,
+                       "summary": "合成用户指令：任务梳理和逐行理解 PR，仍待完成。"}
+        self.evidence.pop("items")
+        self.evidence["sources"].append(instruction)
+        self.evidence["source_mapping"] = {"next-actions": ["s_instruction"]}
+        self.write_metadata()
+        before = self.evidence_path.read_bytes()
+        report = self.load()
+        files = self.files(report)
+        local = json.loads(files["evidence.json"])
+        selected = local["evidence"]["sources"][-1]
+        self.assertEqual(selected["id"], "s_instruction")
+        self.assertEqual(selected["grade"], "reported")
+        self.assertEqual(selected["verified_at"], "源未提供验证时间 / Not supplied")
+        self.assertEqual(local["claims"], [])
+        self.assertEqual(report["data"]["source_evidence"]["sources"][-1], instruction)
+        self.assertNotIn("verified_at", report["data"]["source_evidence"]["sources"][-1])
+        self.assertEqual(self.evidence_path.read_bytes(), before)
+        self.assertIn("源未提供验证时间 / Not supplied", files["evidence.html"])
+        for name in ("document.json", "card.json"):
+            self.assertNotIn(instruction["summary"], files[name])
+            self.assertNotIn("Not supplied", files[name])
+        ordinary = generate_report(self.s, self.p["id"], PERIOD)
+        ordinary_snapshot = json.loads(self.files(ordinary)["evidence.json"])
+        self.assertEqual(ordinary_snapshot["claims"], [])
+        self.assertEqual(ordinary_snapshot["tasks"], [])
+        self.assertNotIn(instruction["summary"], self.files(ordinary)["index.html"])
+        self.assertEqual(self.s.records("claim"), [])
+
+    def test_source_verified_at_present_requires_nonempty_bounded_text(self):
+        for value in (None, "", " ", 123, False, "字" * 101):
+            with self.subTest(value=value):
+                self.evidence["sources"][0]["verified_at"] = value
+                self.write_metadata()
+                with self.assertRaisesRegex(ValueError, "source verified_at"):
+                    self.load()
+        self.assertEqual(self.s.records("report"), [])
 
     def test_mapping_can_reference_distinct_pr_observations_without_exporting_details(self):
         observation = {"id": "pr_fixture", "verified_at": "2026-01-15T17:15:00+08:00",
@@ -282,7 +320,7 @@ class DailyImportTests(Base):
             self.assertNotIn(detail, files["card.json"])
         self.assertEqual(self.s.records("claim"), [])
 
-    def test_pr_observation_refs_require_ids_timestamps_and_no_collisions(self):
+    def test_pr_observation_refs_require_ids_verified_at_and_no_collisions(self):
         valid = {"id": "pr_fixture", "verified_at": "2026-01-15T17:15:00+08:00"}
         self.evidence["source_mapping"] = {"progress": ["pr_fixture"]}
         cases = [(None, "pr_observations"), (["bad"], "must be an object"),

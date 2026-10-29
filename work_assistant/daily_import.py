@@ -399,8 +399,10 @@ def _evidence_summary(evidence):
         ids.add(ident)
         summary = (_text(source["summary"], "source summary") if "summary" in source
                    else "源未提供摘要 / No source summary supplied")
-        selected_sources.append({"id": ident, "kind": "source", "summary": summary,
-                                 "verified_at": _text(source.get("verified_at"), "source verified_at", 100)})
+        verified_at = (_text(source["verified_at"], "source verified_at", 100) if "verified_at" in source
+                       else "源未提供验证时间 / Not supplied")
+        selected_sources.append({"id": ident, "kind": "source", "grade": "reported", "summary": summary,
+                                 "verified_at": verified_at})
     selected_observations = []
     for observation in observations:
         if type(observation) is not dict:
@@ -449,7 +451,7 @@ def render_import(snapshot):
     evidence_lines = ["证据摘要 / Evidence (reported)"]
     evidence_lines += ["%s: %s (sources: %s)" % (i["id"], i["claim"], ", ".join(i["source_ids"]))
                        for i in selected["items"]]
-    evidence_lines += ["%s: %s (source verified_at: %s; supplied by source)" %
+    evidence_lines += ["%s [reported]: %s (source verified_at: %s)" %
                        (s["id"], s["summary"], s["verified_at"]) for s in selected["sources"]]
     evidence_lines += ["%s [pr_observation] (source verified_at: %s; supplied by source)" %
                        (s["id"], s["verified_at"]) for s in selected.get("pr_observations", [])]
