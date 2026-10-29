@@ -100,12 +100,15 @@ sole writable result artifact `.wa-inbound-result.json` at the isolated Git root
 The artifact must be the agent's final action. It is opened O_NOFOLLOW, checked
 as a regular file <=64 KiB, parsed as strict JSON, and checked against exact key
 and random nonce with bounded plain text and `outbound_guard`. It alone never
-proves success: `wait ID --timeout 60s --json` must report idle and `inspect --json`
-must independently report Status=idle and PendingPermissions=[]. Timeouts keep
+proves success: an initial `inspect` must be idle, `wait ID --timeout 1s --json`
+must report idle, and an independent fresh `inspect --json` must again report
+Status=idle and PendingPermissions=[]. Running snapshots return immediately so
+new DS requests do not wait behind the deep agent. Timeouts keep
 waiting without prompts; error/permission states yield needs_user diagnostics,
 never the artifact answer. Missing/invalid final also yields needs_user without
 repair prompts. Full `git status --porcelain=v1 -z --untracked-files=all
---ignored=matching` is checked, excluding only exact `?? .wa-inbound-result.json`.
+--ignored=matching` is checked, excluding only the exact root result path marked
+`?? .wa-inbound-result.json` or `!! .wa-inbound-result.json`.
 Any other change is retained, recorded needs_user and described as unapplied;
 changed HEAD is rejected. No edits are applied/merged/cleaned automatically.
 
@@ -117,6 +120,10 @@ OS user and may technically access other local files or services; V1 consequentl
 remains owner-only test scope. Model output cannot increase any configured grant.
 
 Inspect and resolve without a new prompt:
+
+`run` holds the application flock throughout its lifetime. Stop the foreground
+listener before running `inspect` or `resolve`; those commands acquire the same
+flock. Stopping intake does not stop/relaunch a Paseo agent already dispatched.
 
 ```sh
 python3 -m work_assistant.inbound inspect inbound_KEY --config config.local.json

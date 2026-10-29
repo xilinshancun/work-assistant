@@ -82,25 +82,38 @@ class Paseo:
         if self.settings.get('gpt_model'):args+=['--model',self.settings['gpt_model']]
         value=self.call(args+[prompt],cwd,mutating=True)
         if (type(value) is not dict or value.get('status') not in {'created','running'} or
-                type(value.get('cwd')) is not str or Path(value['cwd']).resolve()!=Path(cwd).resolve()):
+                type(value.get('cwd')) is not str or Path(value['cwd']).expanduser().resolve()!=Path(cwd).expanduser().resolve()):
             raise ProtocolError('Paseo run acknowledgement does not match isolated workspace')
         return agent_id(value.get('agentId'))
 
     def inspect(self,bid,cwd):
-        terminal=self.call(['wait',agent_id(bid),'--timeout','60s','--json'],cwd)
+        value=self.snapshot(bid,cwd)
+        state=self.snapshot_state(value)
+        if state!='idle':return {'state':state,'reason':'agent_error_archived_or_permission'} if state=='needs_user' else {'state':'running'}
+        # Idle needs an independent wait and fresh snapshot; running never waits.
+        terminal=self.call(['wait',agent_id(bid),'--timeout','1s','--json'],cwd)
         if type(terminal) is not dict or terminal.get('agentId')!=bid or terminal.get('status') not in {'idle','timeout','permission','error'}:
             raise ProtocolError('Paseo wait response does not match known agent')
+        if terminal['status'] in {'permission','error'}:
+            return {'state':'needs_user','reason':'agent_error_archived_or_permission'}
+        if terminal['status']=='timeout':return {'state':'running'}
+        state=self.snapshot_state(self.snapshot(bid,cwd))
+        return {'state':'terminal','status':'idle'} if state=='idle' else {'state':state}
+
+    def snapshot(self,bid,cwd):
         value=self.call(['inspect',agent_id(bid),'--json'],cwd)
         if (type(value) is not dict or value.get('Id')!=bid or type(value.get('Cwd')) is not str or
                 Path(value['Cwd']).expanduser().resolve()!=Path(cwd).resolve() or
                 value.get('Status') not in {'running','idle','error','initializing','starting','stopped','closed'} or
                 type(value.get('PendingPermissions')) is not list):
             raise ProtocolError('Paseo inspect does not match known agent/workspace')
-        # Source-derived terminal snapshot, not completion inferred from logs.
-        if terminal['status'] in {'permission','error'} or value.get('Archived') or value['PendingPermissions'] or value['Status'] in {'error','stopped','closed'}:
-            return {'state':'needs_user','reason':'agent_error_archived_or_permission'}
-        if terminal['status']=='timeout' or value['Status']!='idle':return {'state':'running'}
-        return {'state':'terminal','status':'idle'}
+        return value
+
+    @staticmethod
+    def snapshot_state(value):
+        if value.get('Archived') or value['PendingPermissions'] or value['Status'] in {'error','stopped','closed'}:
+            return 'needs_user'
+        return 'idle' if value['Status']=='idle' else 'running'
 
 
 class Worktrees:
@@ -142,10 +155,13 @@ class Worktrees:
         # Expected regular result file is the sole exemption, including ignored
         # files. Nothing is applied, cleaned, checked out, merged or removed.
         data=self.git(['status','--porcelain=v1','-z','--untracked-files=all','--ignored=matching'],path)
-        name=Path(result_path).name; rows=data.split('\x00');changed=[]
+        result=Path(result_path)
+        if result.parent.resolve()!=Path(path).resolve() or result.name!='.wa-inbound-result.json':
+            raise ProtocolError('result exemption must be the exact isolated root artifact')
+        name=result.name; rows=data.split('\x00');changed=[]
         for row in rows:
             if not row:continue
-            if row == '?? '+name:continue
+            if row in ('?? '+name,'!! '+name):continue
             changed.append(digest(row))
         return changed
 

@@ -202,6 +202,42 @@ class InboundTests(unittest.TestCase):
         r=self.engine.records()[0];self.assertIn('final_intent',r['data'])
         self.new_engine().advance(r);self.assertEqual(self.replies,[])
 
+    def test_processing_error_sends_one_diagnostic_preserves_error_and_never_revives_unknown(self):
+        record=self.accept();record=self.engine.save(record,error='original_local_error')
+        record=self.engine.processing_error(record,ProtocolError('do not echo raw error'))
+        self.assertEqual(record['data']['status'],'needs_user');self.assertEqual(record['data']['error'],'original_local_error')
+        self.assertEqual(len(self.replies),1);self.assertIn('处理遇到问题',self.replies[0][2])
+        self.engine.processing_error(record,ValueError('later error'));self.engine.advance(record)
+        self.assertEqual(len(self.replies),1)
+        record=self.engine.save(record,status='final_unknown')
+        after=self.engine.processing_error(record,ValueError('later error'))
+        self.assertEqual(after['data']['status'],'final_unknown');self.assertEqual(len(self.replies),1)
+
+    def test_main_loop_exception_delivers_stable_diagnostic_then_exits_normally(self):
+        class Client:
+            def app_id(self):return 'cli_fixture'
+            def authenticate(self):pass
+            def request(self,*_):return {'open_id':'ou_bot'}
+        class FakeConsumer:
+            proc=type('Proc',(),{'returncode':0})();failure=None
+            def __init__(self,*_):self.ticks=0
+            def start(self,callback,diagnostic):callback(event())
+            def wait_ready(self):return True
+            def alive(self):self.ticks+=1;return self.ticks<=2
+            def close(self):pass
+        def factory(db,conf,bot_id=None):
+            engine=inbound.Engine(db,conf,self.ds,self.paseo,self.worktrees,self.sender,bot_id)
+            def fail(record):
+                engine.save(record,error='original_main_loop_error')
+                raise ValueError('synthetic private error')
+            engine.advance=fail
+            return engine
+        with patch('work_assistant.inbound.time.sleep'),patch('builtins.print'):
+            inbound.run(self.conf,self.store,FakeConsumer,factory,Client())
+        record=self.engine.records()[0]
+        self.assertEqual(record['data']['status'],'needs_user');self.assertEqual(record['data']['error'],'original_main_loop_error')
+        self.assertEqual(len(self.replies),1);self.assertEqual(self.paseo.calls,[])
+
     def test_triaging_can_resume_without_side_effect(self):
         r=self.accept();r=self.engine.save(r,status='triaging')
         done=self.new_engine().advance(r);self.assertEqual(done['data']['status'],'completed');self.assertEqual(len(self.replies),1)
@@ -260,6 +296,15 @@ class InboundTests(unittest.TestCase):
             def app_id(self):return 'cli_other'
             def authenticate(self):raise AssertionError('must not authenticate wrong app')
         with self.assertRaises(ValueError):inbound.preflight(self.conf,self.engine.settings,Client())
+        class UnwrappedClient:
+            def app_id(self):return 'cli_fixture'
+            def authenticate(self):pass
+            def request(self,*_):return {'activate_status':2,'app_name':'Synthetic bot','avatar_url':'https://example.invalid/avatar','ip_white_list':[],'open_id':'ou_bot'}
+        client=UnwrappedClient()
+        self.assertEqual(inbound.preflight(self.conf,self.engine.settings,client),(client,'ou_bot'))
+        class WrongEnvelope(UnwrappedClient):
+            def request(self,*_):return {'bot':{'open_id':'ou_bot'}}
+        with self.assertRaises(ValueError):inbound.preflight(self.conf,self.engine.settings,WrongEnvelope())
         with self.store.inspection_lock(['inbound:cli_fixture']):
             with self.assertRaises(Busy):
                 with self.store.inspection_lock(['inbound:cli_fixture']):pass
@@ -269,7 +314,7 @@ class InboundTests(unittest.TestCase):
         class Client:
             def app_id(self):return 'cli_fixture'
             def authenticate(self):pass
-            def request(self,*_):return {'bot':{'open_id':'ou_bot'}}
+            def request(self,*_):return {'open_id':'ou_bot','activate_status':2,'app_name':'Synthetic bot'}
         class FakeConsumer:
             def __init__(self,client):created.append(self);self.proc=type('Proc',(),{'returncode':0})();self.failure=None;self.ticks=0
             def start(self,callback,diagnostic):
@@ -292,7 +337,7 @@ class InboundTests(unittest.TestCase):
         class Client:
             def app_id(self):return 'cli_fixture'
             def authenticate(self):pass
-            def request(self,*_):return {'bot':{'open_id':'ou_bot'}}
+            def request(self,*_):return {'open_id':'ou_bot','activate_status':2,'app_name':'Synthetic bot'}
         class FakeConsumer:
             def __init__(self,*_):created.append(self)
             def start(self,callback,diagnostic):callback(event())
@@ -333,9 +378,10 @@ class PaseoProtocolTests(unittest.TestCase):
         argv,prompt,kwargs=self.calls[-1];self.assertIn('--no-wait',argv);self.assertNotIn('--output-schema',argv)
         self.assertIn('Read the immutable authorized request JSON',argv[-1]);self.assertEqual(prompt,'')
         self.assertFalse(any(k.startswith('PASEO_') for k in kwargs['env']))
-        self.responses=[self.result({'agentId':bid,'status':'idle','message':'Human transcript, not parsed'}),self.result({'Id':bid,'Status':'idle','Cwd':str(self.root),'PendingPermissions':[],'Archived':False})]
+        snapshot=self.result({'Id':bid,'Status':'idle','Cwd':str(self.root),'PendingPermissions':[],'Archived':False})
+        self.responses=[snapshot,self.result({'agentId':bid,'status':'idle','message':'Human transcript, not parsed'}),snapshot]
         self.assertEqual(self.paseo.inspect(bid,self.root)['state'],'terminal')
-        self.assertIn('60s',self.calls[-2][0]);self.assertFalse(any('logs' in c[0] for c in self.calls))
+        self.assertIn('1s',self.calls[-2][0]);self.assertFalse(any('logs' in c[0] for c in self.calls))
 
     def test_invalid_output_timeout_wrong_cwd_and_unstructured_logs_rejected(self):
         for output in (ProcessResult('Human text'),ProcessResult('[]',timed_out=True),ProcessResult('[]',invalid_utf8=True),
@@ -353,8 +399,22 @@ class PaseoProtocolTests(unittest.TestCase):
 
     def test_wait_permission_error_timeout_never_terminal_result(self):
         for state,wanted in [('permission','needs_user'),('error','needs_user'),('timeout','running')]:
-            self.responses=[self.result({'agentId':'agent','status':state}),self.result({'Id':'agent','Status':'idle','Cwd':str(self.root),'PendingPermissions':[]})]
+            self.responses=[self.result({'Id':'agent','Status':'idle','Cwd':str(self.root),'PendingPermissions':[]}),self.result({'agentId':'agent','status':state})]
             self.assertEqual(self.paseo.inspect('agent',self.root)['state'],wanted)
+
+    def test_running_snapshot_returns_immediately_without_wait_and_idle_is_rechecked(self):
+        self.responses=[self.result({'Id':'agent','Status':'running','Cwd':str(self.root),'PendingPermissions':[]})]
+        self.assertEqual(self.paseo.inspect('agent',self.root)['state'],'running')
+        self.assertEqual(len(self.calls),1);self.assertEqual(self.calls[0][0][1],'inspect')
+        self.responses=[self.result({'Id':'agent','Status':'idle','Cwd':str(self.root),'PendingPermissions':[]}),
+                        self.result({'agentId':'agent','status':'idle'}),
+                        self.result({'Id':'agent','Status':'running','Cwd':str(self.root),'PendingPermissions':[]})]
+        self.assertEqual(self.paseo.inspect('agent',self.root)['state'],'running')
+
+    def test_launch_ack_cwd_expands_user_home(self):
+        with patch.dict(os.environ,{'HOME':str(self.root)}):
+            self.responses=[self.result({'agentId':'agent','status':'created','cwd':'~'})]
+            self.assertEqual(self.paseo.launch('key',self.root,self.root/'request.json',self.root/inbound.RESULT),'agent')
 
     def test_result_symlink_nonregular_oversize_duplicate_key_nonce_and_credentials(self):
         p=self.root/inbound.RESULT
@@ -380,6 +440,11 @@ class PaseoProtocolTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         result=cwd/inbound.RESULT;result.write_text('{}')
         self.assertEqual(work.changes(cwd,head,result),[])
+        (repo/'.git/info/exclude').write_text(inbound.RESULT+'\n')
+        self.assertIn('!! '+inbound.RESULT,work.git(['status','--porcelain=v1','--ignored=matching'],cwd))
+        self.assertEqual(work.changes(cwd,head,result),[])
+        (cwd/(inbound.RESULT+'.extra')).write_text('Unrelated file')
+        self.assertTrue(work.changes(cwd,head,result));(cwd/(inbound.RESULT+'.extra')).unlink()
         (cwd/'source.txt').write_text('Unapplied synthetic edit');self.assertTrue(work.changes(cwd,head,result))
         self.assertEqual((repo/'source.txt').read_text(),'Synthetic source')
 

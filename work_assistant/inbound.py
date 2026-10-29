@@ -269,6 +269,7 @@ class Engine:
     def advance(self,record):
         data=record['data']
         if data.get('settings_hash')!=digest(self.settings):raise ProtocolError('inbound config changed; inspect original authorization')
+        if data.get('diagnostic_final'):return record
         status=data['status']
         if status in {'received','triaging'}:record=self.classify(record);status=record['data']['status']
         if status=='escalating':return self.dispatch(record)
@@ -308,6 +309,18 @@ class Engine:
                     result[kind+'_verification']=inspect_message(self.store,self.conf['publisher'],receipt['action_id'])
         return result
 
+    def processing_error(self,record,exc):
+        """One stable diagnostic final; retain original failure/state."""
+        data=record['data']
+        changes={'processing_error':data.get('processing_error') or {'type':type(exc).__name__,'at':now()}}
+        if not data.get('error'):changes['error']='inbound_processing_error; preserve artifacts and inspect'
+        record=self.save(record,**changes)
+        if data.get('final_intent') or data['status'] in {'completed','final_unknown','resolved_absent'}:
+            return record
+        status='outcome_unknown' if data['status'] in {'gpt_dispatching','outcome_unknown'} else 'needs_user'
+        record=self.save(record,diagnostic_final=True)
+        return self.final(record,'处理遇到问题，请检查本地记录 '+record['id']+'；未重新派发或重发操作。',status)
+
     def resolve(self,key,absent,reason):
         if absent is not True or type(reason) is not str or not reason.strip():raise ValueError('resolution requires --absent and nonempty reason')
         record=self.store.get(key);data=record['data']
@@ -342,7 +355,9 @@ class Engine:
 def preflight(conf,settings,client=None):
     client=client or LarkCLI(conf['publisher'])
     if client.app_id()!=settings['expected_app_id']:raise ValueError('inbound application identity mismatch')
-    client.authenticate();info=client.request('GET','/bot/v3/info');bot=info.get('bot',{}).get('open_id')
+    # Official lark-cli API output is already unwrapped by LarkCLI.request:
+    # bot/v3/info data is the bot object itself, not another {bot: ...} envelope.
+    client.authenticate();info=client.request('GET','/bot/v3/info');bot=info.get('open_id') if type(info) is dict else None
     if type(bot) is not str or re.fullmatch(r'ou_[A-Za-z0-9_-]+',bot) is None or bot==settings['owner_open_id']:
         raise ValueError('bot info did not return a distinct valid bot open_id')
     return client,bot
@@ -379,10 +394,12 @@ def run(conf,store,consumer_factory=Consumer,engine_factory=Engine,client=None):
                         if time.monotonic()<next_poll:continue
                         polled=True
                     try:engine.advance(record)
-                    except (Exception,):
+                    except Exception as exc:
                         current=store.get(record['id'])
-                        if current['data']['status'] not in {'gpt_dispatching','outcome_unknown'}:
-                            engine.save(current,status='needs_user',error='inbound_processing_error; preserve artifacts and inspect')
+                        try:engine.processing_error(current,exc)
+                        except Exception:
+                            current=store.get(record['id'])
+                            engine.save(current,status='final_unknown' if current['data'].get('final_intent') else 'needs_user')
                 if polled:next_poll=time.monotonic()+settings['poll_interval']
                 time.sleep(.2)
             diagnostic('consumer_exit_no_restart')
