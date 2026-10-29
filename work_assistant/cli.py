@@ -147,7 +147,7 @@ def dispatch(args, conf, store):
         return generate_report(store, args.project, args.date, args.output)
     if c == "import-daily":
         return import_daily(store, args.project, args.source_root, args.date, args.timezone, title=args.title,
-                            body_scope=args.body_scope)
+                            body_scope=args.body_scope, card_signature=conf["publisher"].get("card_signature"))
     if c == "publish":
         if args.id in {"adopt-timeline", "rename-timeline"}:
             if not args.target_id or not args.confirm or args.dry_run:

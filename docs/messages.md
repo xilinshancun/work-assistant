@@ -91,3 +91,25 @@ CLI 输出 JSON。退出码：0 为 dry-run、已验证完成、群列表完成�
 - 原文副本存放于配置的私有 state/messages 中，文件模式 0600；运行数据库、副本、真实消息和回执均不得提交 Git。
 
 协议核对使用[官方发送消息 API](https://open.feishu.cn/document/server-docs/im-v1/message/create)、[获取指定消息](https://open.feishu.cn/document/server-docs/im-v1/message/get)、[群列表](https://open.feishu.cn/document/server-docs/im-v1/chat/list)及[官方 SDK 模型](https://github.com/larksuite/oapi-sdk-go/blob/v3_main/service/im/v1/model.go)。飞书 UUID 的服务端去重窗口不能代替本地持久 unknown 规则。本仓库测试只用合成 HTTP／CLI fixture，包括中断与锁冲突；不代表任何真实租户或用户发送已验收。
+
+
+## Display-only interactive cards
+
+The same `send` command also accepts `--card-file card.json` instead of `--text-file`.
+It uses the same request ID, locks, durable intent and unknown-outcome rules. The
+bounded v1 format supports a blue title, plain text or balanced bold Markdown,
+dividers, notes and HTTPS URL buttons; callbacks, forms, mentions and bare URLs
+in text are rejected. Maximum source size remains 16 KiB. This does not authorize
+sending or updating an existing message by itself.
+
+Message GET returns readable card content, often omitting button URLs and visual
+styles. A completed receipt verifies the returned title, rows, button labels,
+sender and chat; `verification_scope` explicitly excludes URL click-through and
+visual layout. The immutable source retains the exact sent URL/style payload.
+A differing readback remains `verification_pending`, never a new POST.
+
+Imported daily cards can use a trusted `publisher.card_signature` string (up to
+200 characters) in local config. This replaces the default footer verbatim,
+participates in the report hash, and does not change the document. Omit it to
+retain the default project and cutoff footer. Personal signatures belong only
+in private local configuration.

@@ -653,7 +653,7 @@ def render_import(snapshot):
         struck = any(e["text_run"].get("text_element_style", {}).get("strikethrough") for e in elements)
         bullet_divs.append({"tag": "div", "text": {"tag": "lark_md" if struck else "plain_text",
                            "content": "• " + (styled_markdown(elements, card=True) if struck else text)}})
-    signature = "工作助理 · %s · %s" % (snapshot["project"], time_hint)
+    signature = snapshot.get("card_signature") or "工作助理 · %s · %s" % (snapshot["project"], time_hint)
     card = {"config": {"wide_screen_mode": True, "update_multi": True},
             "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
             "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**" + styled_markdown(summary_elements[0], card=True, outer_bold=True) + "**"}},
@@ -691,9 +691,11 @@ def render_import(snapshot):
                                       + " href='index.html'>打开 Daily Sync</a><p class='meta'>" + escape(signature) + "</p></section>")}
 
 
-def import_daily(store, project, source_root, period, timezone_name="Asia/Shanghai", title=None, body_scope="strict"):
+def import_daily(store, project, source_root, period, timezone_name="Asia/Shanghai", title=None, body_scope="strict", card_signature=None):
     if type(body_scope) is not str or body_scope not in {"strict", "main"}:
         raise ValueError("body_scope must be strict or main")
+    if card_signature is not None:
+        card_signature = _text(card_signature, "card signature", 200).strip()
     if title is not None:
         title = _text(title, "display title", 200).strip()
     try:
@@ -754,6 +756,9 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
             "summary_elements": summary_elements,
             "import_options": {"body_scope": body_scope},
             "scope": SCOPE, "tasks": [], "claims": [], "corrections": [], "evidence": selected})
+        if card_signature is not None:
+            snapshot["card_signature"] = export_data(card_signature)
+            snapshot["import_options"]["card_signature"] = snapshot["card_signature"]
         content = render_import(snapshot)
         # Re-read every input, including state, after extraction/rendering. Changed bytes,
         # disappeared files, or replaced symlinks invalidate the entire attempt.

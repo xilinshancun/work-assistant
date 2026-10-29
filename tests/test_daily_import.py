@@ -893,6 +893,19 @@ class DailyImportTests(Base):
         with self.assertRaisesRegex(ValueError, "immutable report"):
             self.load()
 
+    def test_trusted_card_signature_changes_card_hash_only(self):
+        first = self.load()
+        revised = self.load(card_signature="— From Synthetic Assistant")
+        self.assertNotEqual(first["data"]["hash"], revised["data"]["hash"])
+        before, after = self.files(first), self.files(revised)
+        self.assertEqual(before["document.json"], after["document.json"])
+        self.assertEqual(json.loads(after["card.json"])["elements"][-1]["elements"][0]["content"], "— From Synthetic Assistant")
+        self.assertIn("— From Synthetic Assistant", after["card-preview.html"])
+        self.assertEqual(revised["id"], self.load(card_signature="— From Synthetic Assistant")["id"])
+        for invalid in ["", "  ", 42, "x" * 201]:
+            with self.assertRaises(ValueError):
+                self.load(card_signature=invalid)
+
     def test_title_override_changes_display_hash_preserves_source_and_period(self):
         source_before = self.report_path.read_bytes()
         first = self.load()

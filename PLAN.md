@@ -209,3 +209,7 @@ extant files; modified files are always rejected and never replaced. Synthetic e
 examples/daily-bundle; no personal source paths or business data are tracked.
 
 Claude architect supplies the plan; Codex implementation worker owns main branch in its assigned worktree. A second Codex worker independently implements only policy.py and policy tests in a separate worktree using the exact pure interface above, to compare the critical permission boundary. Claude reviewer evaluates both and reviews the integrated implementation. Root integrates, validates live adapters, and handles authorized public GitHub creation/push after checks. No worker creates remote repositories or sends external messages.
+
+
+## Display card messages and trusted signature
+Reuse messages send/checkpoint for a bounded display-only interactive card. Keep text backward compatible, exact request identity and no unknown retries. Verify only the readable message-GET projection and state the missing URL/style validation. Importer takes optional trusted publisher.card_signature; personal values remain local.

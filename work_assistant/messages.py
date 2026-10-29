@@ -1,4 +1,4 @@
-"""Explicit outgoing plain-text messages; no scheduler, inbound service, or retries."""
+"""Explicit outgoing text/display cards with durable receipts and no automatic retries."""
 import argparse
 import json
 import os
@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from . import config
+from .message_cards import parse_card, card_projection
 from .feishu import APIError, AmbiguousError, BASE, http, make_client
 from .process import TerminationRequested, termination_guard
 from .store import Busy, Store
@@ -80,7 +81,7 @@ def _receipt(record, no_op=False):
     data = record["data"]
     fields = ("request_id", "status", "verification_status", "uuid", "receive_id_type", "receive_id",
               "text_sha256", "target_sha256", "expected_sender_app_id", "message_id", "chat_id",
-              "send_acknowledged", "checks", "error", "verified_at", "resolution")
+              "send_acknowledged", "checks", "error", "verified_at", "resolution", "msg_type", "verification_scope")
     return dict({key: data.get(key) for key in fields}, action_id=record["id"], no_op=no_op)
 
 
@@ -134,6 +135,7 @@ def _readback(store, record, client):
         if digest(raw) != data["text_sha256"]:
             raise MessageError("private source is missing or modified")
         expected = raw.decode("utf-8")
+        card = parse_card(expected) if data.get("msg_type", "text") == "interactive" else None
         result = client.request("GET", "/im/v1/messages/" + quote(data["message_id"], safe=""))
         if type(result) is not dict or type(result.get("items")) is not list or len(result["items"]) != 1:
             raise MessageError("readback must contain exactly the known message")
@@ -146,14 +148,17 @@ def _readback(store, record, client):
                   "sender": (type(sender) is dict and sender.get("sender_type") == "app"
                              and sender.get("id_type") == "app_id" and sender.get("id") == data["expected_sender_app_id"]),
                   "chat": bool(data.get("chat_id")) and message.get("chat_id") == data["chat_id"],
-                  "text": type(content) is dict and set(content) == {"text"} and content["text"] == expected,
-                  "msg_type": message.get("msg_type") == "text",
+                  "content": (content == card_projection(card) or content == card) if card is not None else (type(content) is dict and set(content) == {"text"} and content["text"] == expected),
+                  "msg_type": message.get("msg_type") == data.get("msg_type", "text"),
                   "not_deleted": message.get("deleted", False) is False}
+        if card is None:
+            checks["text"] = checks.pop("content")
         verified = all(checks.values())
+        scope = "readable_card_content_identity_and_chat; URLs/styles retained in sent payload, not independently verified by GET" if card is not None else "exact_text_identity_and_chat"
         record = _save(store, record, checks=checks, status="completed" if verified else "verification_pending",
                        verification_status="verified" if verified else "verification_pending",
                        error=None if verified else "readback_does_not_match_expected_message",
-                       verified_at=now() if verified else None)
+                       verified_at=now() if verified else None, verification_scope=scope)
     except BaseException as exc:
         record = _save(store, record, status="verification_pending", verification_status="verification_pending",
                        error="readback_unavailable_or_invalid; known sent ID retained; inspect only", verified_at=None, checks={})
@@ -166,7 +171,7 @@ def _readback(store, record, client):
 
 
 def send(store, settings, request_id, receive_id_type, receive_id, text_file, confirm=False,
-         transport=http, base=BASE, process=None):
+         transport=http, base=BASE, process=None, card_file=None):
     """One explicit user request. Reentry never performs a second POST."""
     _settings(settings)
     if type(confirm) is not bool:
@@ -175,7 +180,14 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
     if type(receive_id_type) is not str or receive_id_type not in {"chat_id", "open_id"}:
         raise MessageError("receive-id-type must be chat_id or open_id")
     _id(receive_id, "receive-id", "oc_" if receive_id_type == "chat_id" else "ou_")
-    text, raw = _text_file(text_file)
+    if (text_file is None) == (card_file is None):
+        raise MessageError("provide exactly one text-file or card-file")
+    text, raw = _text_file(card_file if card_file is not None else text_file)
+    try:
+        card = parse_card(text) if card_file is not None else None
+    except ValueError:
+        raise MessageError("card-file must be a supported display-only card") from None
+    msg_type = "interactive" if card is not None else "text"
     ident = _action_id(request_id)
     target_hash, text_hash = digest([receive_id_type, receive_id]), digest(raw)
     resource = "message:" + digest(request_id)
@@ -183,13 +195,13 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
     with store.inspection_lock([resource, payload_resource]):
         record = _find(store, ident)
         if record and (record["data"]["request_id"] != request_id or record["data"]["target_sha256"] != target_hash
-                       or record["data"]["text_sha256"] != text_hash):
+                       or record["data"]["text_sha256"] != text_hash or record["data"].get("msg_type", "text") != msg_type):
             raise MessageError("request-id already belongs to different target/content; do not replace it")
         if not confirm:
             return {"status": "dry_run", "action_id": ident, "request_id": request_id,
                     "receive_id_type": receive_id_type, "receive_id": receive_id,
                     "text": text, "text_sha256": text_hash, "target_sha256": target_hash,
-                    "prior_status": record["data"]["status"] if record else None, "confirm_required": True}
+                    "prior_status": record["data"]["status"] if record else None, "confirm_required": True, "msg_type": msg_type}
         if record:
             return _receipt(_recover(store, record), no_op=True)
         for prior in store.records(KIND):
@@ -201,7 +213,7 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
         with store.transaction():
             record = store.record(KIND, {"schema": "wa.message.v1", "request_id": request_id,
                 "receive_id_type": receive_id_type, "receive_id": receive_id, "target_sha256": target_hash,
-                "text_sha256": text_hash, "source_artifact": artifact,
+                "text_sha256": text_hash, "source_artifact": artifact, "msg_type": msg_type,
                 "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, "wa.outgoing-message:" + request_id)),
                 "status": "preparing", "verification_status": "not_sent", "expected_sender_app_id": None,
                 "message_id": None, "chat_id": receive_id if receive_id_type == "chat_id" else None,
@@ -219,7 +231,7 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
             return _receipt(record)
         record = _save(store, record, status="sending", verification_status="unresolved")
         try:
-            body = {"receive_id": receive_id, "msg_type": "text", "content": dumps({"text": text}),
+            body = {"receive_id": receive_id, "msg_type": msg_type, "content": dumps(card if card is not None else {"text": text}),
                     "uuid": record["data"]["uuid"]}
             result = client.request("POST", "/im/v1/messages?" + urlencode({"receive_id_type": receive_id_type}), body)
             if type(result) is not dict:
@@ -338,7 +350,9 @@ def parser():
     command.add_argument("--request-id", required=True)
     command.add_argument("--receive-id-type", choices=["chat_id", "open_id"], required=True)
     command.add_argument("--receive-id", required=True)
-    command.add_argument("--text-file", required=True)
+    files = command.add_mutually_exclusive_group(required=True)
+    files.add_argument("--text-file")
+    files.add_argument("--card-file", help="Display-only interactive card JSON; no callbacks or forms")
     modes = command.add_mutually_exclusive_group()
     modes.add_argument("--confirm", action="store_true")
     modes.add_argument("--dry-run", action="store_true")
@@ -364,7 +378,7 @@ def main(argv=None):
                 try:
                     if args.command == "send":
                         result = send(store, conf["publisher"], args.request_id, args.receive_id_type, args.receive_id,
-                                      args.text_file, confirm=args.confirm)
+                                      args.text_file, confirm=args.confirm, card_file=args.card_file)
                     elif args.command == "resolve":
                         result = resolve(store, args.action_id, absent=args.absent, reason=args.reason, confirm=args.confirm)
                     else:
