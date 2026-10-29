@@ -51,8 +51,8 @@ defines the Callout fields and Block children type. The fixed mapping is:
 | blue | 5 | 5 | bulb |
 
 Source attributes cannot supply arbitrary API colors or emoji IDs. The full
-official emoji enumeration has not been verified; `bulb` is configured under
-the agreed contract and requires operator verification before live use.
+official emoji enumeration has not been verified; these two names are explicit
+supported mappings, not a claim that arbitrary emoji identifiers are valid.
 
 The renderer supports one callout layer, with native text (2), heading1–heading6
 (3–8), and bullet (12) leaves. Empty callouts, nested callouts, unknown tones,
@@ -68,8 +68,17 @@ formatting. Cards continue to use the same source summary paragraphs.
 Reports without an exported callout keep the original flat
 `{"title": "...", "children": [...]}` format and output behavior.
 
-This tree is not an API request and is not supported by the existing flat
-publisher. Its preview/publish validation rejects this format before network
-requests or publication intent. Use the generated local HTML preview for now;
-tree/timeline publishing must be implemented and reviewed separately. There is
-no automatic flattening, migration, live request, or new publication grant.
+This tree is not an API request. Preview validates it offline; application
+publication requires `document_layout=timeline`. The default per-period flat
+publisher rejects it before requests or publication intent. Timeline translates
+`child_blocks` to temporary IDs and official descendant payloads, validates every
+returned ID relation against whole-tree GET readback, and keeps checkpoints per
+effect. Large containers are created with nonempty children then extended in
+bounded batches. Existing same-style callouts and compatible leaf IDs are reused.
+There is no automatic flattening or implicit adoption of a locked document.
+
+An existing approved surgery acknowledgement may be explicitly adopted using
+`publish adopt-timeline ... --tree-journal ... --confirm`; see the README for
+ownership/preserved-child rules and unknown-outcome recovery. Synthetic HTTP
+tests demonstrate protocol/recovery logic only; they do not establish rendering,
+account permissions or live delivery in any reader's tenant.

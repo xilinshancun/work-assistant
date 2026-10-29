@@ -190,7 +190,7 @@ class DailyImportTests(Base):
                                        '<section id="sync-summary" data-callout-tone="blue">'))
         report = self.load()
         transport = FakeHTTP()
-        with self.assertRaisesRegex(ValueError, "invalid card/document"):
+        with self.assertRaisesRegex(ValueError, "native tree documents require timeline"):
             publish(self.s, self.conf["publisher"], report["id"], confirm=True, transport=transport)
         self.assertEqual(transport.calls, [])
         self.assertEqual(self.s.records("publication"), [])

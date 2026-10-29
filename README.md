@@ -220,7 +220,7 @@ python3 -m work_assistant publish REPORT_ID --confirm
 
 此配置由使用者管理，模型输出不能切换布局或创建授权。`timeline_title` 只决定新建固定文档的标题；已有绑定的标题不会随配置或日报标题自动改变。文档每个日期以原生 heading1 开始，最新日期在顶部，保留该日报原有 heading2/heading3、列表和内联样式。同日同类型只 PATCH 签名变化的块；块数、类型或块级样式变化时，仅替换当天区间，保留其他日期的 IDs 与内容。日卡仍按目的地＋项目＋日期建立身份，同日修订复用 message_id，跨日卡片均指向固定文档。日卡标题与固定文档标题独立。
 
-当前实现只维护受管理的直属原生文字块。已有 callout、嵌套子块或额外手工块会拒绝采用或修改，不能用平铺快照覆盖；此类文档需要另行实现并审查树形支持。
+timeline 同时支持原文字块格式和 [`wa.document.tree.v1` 原生 callout 树](docs/daily-callouts.md)。同色同图标的 callout 保留父块 ID，子块内容按叶子 ID 更新；结构变化只创建和核对受影响的新子树，再删除已确认的工具块。新日期只插入新章节，保留历史树与 IDs。每个 callout 和子块都计入本地上限；未登记的手工块、结构变化或目标日期的人工编辑会停止，不能用平铺快照覆盖。
 
 已有 `per_period` 文档和卡片必须先明确采用，不能通过切换配置自动复制或新建替代文档：
 
@@ -231,6 +231,14 @@ python3 -m work_assistant publish REPORT_ID --confirm
 
 adopt 只接受同一目的地、同一项目的 completed 发布，且原文档所有直属块 ID、内容、样式、标题均与已确认快照一致，没有未完成迁移。它建立本地 `doc_binding`，沿用原 document_id/message_id，不创建文档、卡片或额外分享。省略 `--title` 就保留现有文档标题；提供 `--title` 才执行独立预写、PATCH page block 和 GET 核对。adopt 后第一次正式发布会在原日期正文前补入日期 heading1，仍使用同一文档和卡片。其他旧周期的独立文档不会被自动收集、改写或删除。
 
+经过受审查的一次性原生树迁移、并且已保存完整 `publication.document_tree` ack 的文档，需要显式提供已完成的私有手术 journal：
+
+```sh
+python3 -m work_assistant publish adopt-timeline PUBLICATION_ID --confirm --tree-journal /private/path/completed-journal.json --title 'Project Daily Sync'
+```
+
+此入口核对同一文档的 journal、publication ack、冻结报告叶子内容和远端完整树；只读核对通过后，才在本地事务中解除该 publication 的 layout_lock 并记录旧锁和采用来源。未提供 journal 时锁始终生效。原用户 callout 标为 `user-adopted`；原有空文字子块也标为 `user-adopted/preserved`，即使源 renderer 没有该块也会保留。第一次采用不重建 callout；第一次发布只补日期 h1 及明确变化的内容。源数据不能删除、改色或以含糊匹配替换用户容器，也不能覆盖保留块。未知或未完成的手术日志不可采用。该入口仅兼容已确认的私有 surgery ack 格式，不接受模型生成的任意树作为远端证据。
+
 需要单独改固定文档标题时使用返回的 binding_record_id：
 
 ```sh
@@ -239,9 +247,9 @@ python3 -m work_assistant publish rename-timeline DOC_BINDING_ID --confirm --tit
 
 日报发布取得共享文档锁和当日卡片锁，并在锁内重载 binding；独立 rename 只需共享文档锁。写入前读取完整根块 IDs，分页核对目标前缀和当天内容/样式；结构多块、少块、乱序或当前日期被人工编辑时返回 needs_user，卡片也不更新。其他日期的文字编辑、样式或评论不被覆盖，也不会仅因此阻止新日期插入。完整同内容 no-op 不发送任何请求；有待处理的未知文档操作则先要求核对。
 
-`timeline_max_blocks` 是本地保守上限，默认 3000，包含结构替换时短暂并存的新旧块；它不是飞书公布的文档容量。达到上限会停止，请自行明确归档或调整本地上限，程序不会自动删历史。根 page block 的 children 使用 API 返回的完整 IDs，并与已知段落拼接及分页前缀交叉核对；不臆造根 ID 数组的分页协议。
+`timeline_max_blocks` 是本地保守上限，默认 3000，包含 callout 容器、全部子块、保留的用户节点及结构替换时短暂并存的新旧块；它不是飞书公布的文档容量。达到上限会停止，请自行明确归档或调整本地上限，程序不会自动删历史。平铺文档使用根 children IDs 与分页前缀核对；树形文档分页读取全部 blocks，在稳定 revision 下验证完整父子边、ID 顺序与目标日期签名，不臆造根 ID 数组的分页协议。历史文字和评论保留，但不会被静默更新为以后可覆盖的 ack。
 
-新增块按每批至多 50 个插入，写入前持久化 operation、旧/新 IDs、目标快照、索引、client_token 和 body hash，成功后再确认。插入、删除、同类型 PATCH、分享或改名超时/中断均停止，不会借重新导入、取消或下一天调用盲目重发。先只读核对返回的 doc_binding 或 publication：
+新增块按每批至多 50 个插入（树请求包含父块和子块总数）；callout 至少带一个子块创建，较大的子树先创建有内容的前缀，再分批添加其余子块。写入前持久化 operation、旧/新 IDs、目标快照、索引、UUIDv4 client_token 和 body hash，成功并 GET 整树核对后再确认。插入、删除、同类型 PATCH、分享或改名超时/中断均停止，不会借重新导入、取消或下一天调用盲目重发。先只读核对返回的 doc_binding 或 publication：
 
 ```sh
 python3 -m work_assistant reconcile DOC_BINDING_ID

@@ -250,11 +250,10 @@ def preview(store, report_id):
     root = Path(report["data"]["path"])
     card = json.loads((root / "card.json").read_text(encoding="utf-8"))
     document = json.loads((root / "document.json").read_text(encoding="utf-8"))
-    if (type(card.get("elements")) is not list or not card["elements"] or
-            type(document.get("children")) is not list or not document["children"]):
+    if type(card.get("elements")) is not list or not card["elements"]:
         raise ValueError("invalid card/document payload")
-    for block in document["children"]:
-        block_signature(block)
+    from .document_tree import local_blocks
+    local_blocks(document)
     return {"status": "dry_run", "report": report_id, "hash": report["data"]["hash"], "path": str(root),
             "card": card, "document": document, "note": "local preview only; webhook supports cards only; no network requests"}
 
@@ -304,6 +303,8 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
         from .timeline import publish_timeline
         return publish_timeline(store, settings, report_id, confirm, transport, base, retry, process)
     payload = preview(store, report_id)
+    if payload['document'].get('format') == 'wa.document.tree.v1' and settings.get('mode') == 'app':
+        raise ValueError('native tree documents require timeline layout and explicit adoption of existing documents')
     report_hash = payload["hash"]
     client = make_client(settings, transport, base, process)
     if settings["mode"] == "app":

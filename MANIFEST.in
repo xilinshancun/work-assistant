@@ -5,6 +5,7 @@ include examples/config.timeline.example.json
 include examples/sample-observation.json
 include examples/paseo-entry.md
 recursive-include tests test_*.py
+recursive-include docs *.md
 prune .wa
 prune out
 global-exclude *.pyc *.pyo .DS_Store

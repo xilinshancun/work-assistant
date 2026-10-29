@@ -100,6 +100,7 @@ def parser():
     a.add_argument("id", help="REPORT_ID, adopt-timeline, or rename-timeline")
     a.add_argument("target_id", nargs="?", help="publication/binding ID for explicit adopt/rename")
     a.add_argument("--title", help="explicit canonical document title for adopt/rename only")
+    a.add_argument("--tree-journal", help="explicit completed native surgery acknowledgement for adopt-timeline only")
     modes = a.add_mutually_exclusive_group()
     modes.add_argument("--dry-run", action="store_true")
     modes.add_argument("--confirm", action="store_true")
@@ -155,9 +156,10 @@ def dispatch(args, conf, store):
             if args.id == "adopt-timeline":
                 if args.retry:
                     raise ValueError("adoption is not retried; reconcile binding and use rename-timeline if needed")
-                return adopt_timeline(store, conf["publisher"], args.target_id, confirm=True, title=args.title)
+                return adopt_timeline(store, conf["publisher"], args.target_id, confirm=True, title=args.title, tree_journal=args.tree_journal)
+            if args.tree_journal:raise ValueError('--tree-journal is only accepted for adopt-timeline')
             return rename_timeline(store, conf["publisher"], args.target_id, args.title, confirm=True, retry=args.retry)
-        if args.target_id or args.title is not None:
+        if args.target_id or args.title is not None or args.tree_journal:
             raise ValueError("target ID and --title are only accepted for explicit adopt/rename")
         if args.dry_run or (not args.confirm and not conf["publisher"].get("grants")):
             return preview(store, args.id)

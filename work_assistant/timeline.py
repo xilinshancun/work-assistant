@@ -35,7 +35,26 @@ def guard_layout(store, binding):
 def section_blocks(payload, period):
     if date.fromisoformat(period).isoformat() != period:
         raise ValueError('timeline period must be YYYY-MM-DD')
-    return [{'block_type': 3, 'heading1': {'elements': [{'text_run': {'content': period}}]}}] + payload['document']['children']
+    from .document_tree import local_blocks
+    return [{'block_type': 3, 'heading1': {'elements': [{'text_run': {'content': period}}]}}] + local_blocks(payload['document'])
+
+
+def binding_observe(client, binding, title=None):
+    if binding.get('tree_mode'):
+        from .document_tree import observe as tree_observe, roots, same_nodes
+        actual=tree_observe(client,binding['document_id'])
+        if title is not None and actual['title']!=title:raise NeedsUser('timeline title differs from acknowledgement')
+        try:same_nodes(actual['nodes'],roots(binding),())
+        except APIError as exc:raise NeedsUser(str(exc)) from None
+        return actual
+    return observe(client,binding['document_id'],expected=root_ids(binding),title=title)
+
+
+def document_engine(store, client, record):
+    if record['data'].get('tree_mode'):
+        from .timeline_tree import TreeDocument
+        return TreeDocument(store,client,record)
+    return Document(store,client,record)
 
 
 def observe(client, document_id, ranges=(), expected=None, title=None):
@@ -95,6 +114,9 @@ def observe(client, document_id, ranges=(), expected=None, title=None):
 def operation_view(client, binding):
     """Classify the exact effects of a pending operation without changing records."""
     op = binding['operation']
+    if op.get('kind')=='tree':
+        from .timeline_tree import operation_view as tree_operation_view
+        return tree_operation_view(client,binding)
     before = op['prefix'] + op['old_ids'] + op['suffix']
     observed = observe(client, binding['document_id'])
     ids, pos = observed['ids'], len(op['prefix'])
@@ -187,7 +209,7 @@ class Document:
                 if data.get('operation'):
                     operation_view(self.client, data)
                 else:
-                    observe(self.client, data['document_id'], expected=root_ids(data), title=data['title'])
+                    binding_observe(self.client, data, title=data['title'])
                 doc = urllib.parse.quote(data['document_id'], safe='')
                 self.effect('share', 'POST', '/drive/v1/permissions/%s/members?type=docx&need_notification=false' % doc,
                     {'member_type':'openid', 'member_id':member, 'perm':perm, 'type':'user'})
@@ -300,15 +322,15 @@ class Document:
         if data.get('rename_request') and data['rename_request']['new_title']!=title:
             raise NeedsUser('finish or cancel existing title operation before changing its target')
         if title==data['title']:
-            observe(self.client,data['document_id'],expected=root_ids(data),title=data['title'])
+            binding_observe(self.client,data,title=data['title'])
             return False
         request=data.get('rename_request') or {'old_title':data['title'],'new_title':title,'client_token':str(uuid.uuid4())}
         data['rename_request']=request;self.save()
-        observe(self.client,data['document_id'],expected=root_ids(data),title=data['title'])
+        binding_observe(self.client,data,title=data['title'])
         doc=urllib.parse.quote(data['document_id'],safe='')
         self.effect('rename','PATCH','/docx/v1/documents/%s/blocks/%s?client_token=%s'%(doc,doc,request['client_token']),
                     {'update_text_elements':{'elements':[{'text_run':{'content':title}}]}},old_title=data['title'],new_title=title)
-        actual=observe(self.client,data['document_id'],expected=root_ids(data))
+        actual=binding_observe(self.client,data)
         if actual['title']!=title:raise AmbiguousError('timeline title update not verified')
         data.update(title=title,rename_request=None,status='completed',ack_revision=actual['revision'])
         self.ack();return True
@@ -374,14 +396,21 @@ def publish_timeline(store, settings, report_id, confirm=False, transport=None, 
         data.pop('error',None)
         publication=store.record('publication',data,project_id=report['project_id'])
         binding['active_publication']=publication['id']
-        engine=Document(store,client,record);engine.save()
+        if payload['document'].get('format')=='wa.document.tree.v1':
+            from .timeline_tree import ensure_tree
+            ensure_tree(binding)
+        engine=document_engine(store,client,record);engine.save()
         document_committed=False
         try:
-            current_total=len(root_ids(binding));old_size=len(section['block_ids']) if section else 0
-            same=section and len(section['signatures'])==len(wanted) and all(a['block_type']==b['block_type'] and a['style']==b['style'] for a,b in zip(section['signatures'],map(block_signature,wanted)))
-            peak=current_total-old_size+len(wanted) if same else current_total+len(wanted)
-            if (not section or section['section_hash']!=wanted_hash) and peak>settings.get('timeline_max_blocks',3000):
-                raise NeedsUser('local timeline block limit exceeded; no automatic history deletion')
+            if binding.get('tree_mode'):
+                if not binding.get('operation'):
+                    engine.preflight(period,report,payload,settings.get('timeline_max_blocks',3000))
+            else:
+                current_total=len(root_ids(binding));old_size=len(section['block_ids']) if section else 0
+                same=section and len(section['signatures'])==len(wanted) and all(a['block_type']==b['block_type'] and a['style']==b['style'] for a,b in zip(section['signatures'],map(block_signature,wanted)))
+                peak=current_total-old_size+len(wanted) if same else current_total+len(wanted)
+                if (not section or section['section_hash']!=wanted_hash) and peak>settings.get('timeline_max_blocks',3000):
+                    raise NeedsUser('local timeline block limit exceeded; no automatic history deletion')
             engine.create()
             data['document_id']=binding['document_id'];store.update_record(publication['id'],data)
             if binding.get('operation'):
@@ -392,13 +421,21 @@ def publish_timeline(store, settings, report_id, confirm=False, transport=None, 
                 engine.start_section(period,report,payload,settings.get('timeline_max_blocks',3000))
                 engine.finish_section()
             else:
-                pos=sum(len(binding['sections'][day]['block_ids']) for day in binding['order'] if day>period)
-                actual=observe(client,binding['document_id'],[(pos,pos+len(section['block_ids']))],root_ids(binding),binding['title'])
-                if [actual['signatures'][pos+i] for i in range(len(section['block_ids']))]!=section['signatures']:
-                    raise NeedsUser('target day edited before card-only update; no writes allowed')
+                if binding.get('tree_mode'):
+                    from .document_tree import observe as tree_observe, same_nodes, roots
+                    actual=tree_observe(client,binding['document_id'])
+                    if actual['title']!=binding['title']:raise NeedsUser('tree timeline title edited')
+                    try:same_nodes(actual['nodes'],roots(binding),set(section['block_ids']))
+                    except APIError as exc:raise NeedsUser(str(exc)) from None
+                else:
+                    pos=sum(len(binding['sections'][day]['block_ids']) for day in binding['order'] if day>period)
+                    actual=observe(client,binding['document_id'],[(pos,pos+len(section['block_ids']))],root_ids(binding),binding['title'])
+                    if [actual['signatures'][pos+i] for i in range(len(section['block_ids']))]!=section['signatures']:
+                        raise NeedsUser('target day edited before card-only update; no writes allowed')
                 section.update(report_id=report_id, report_hash=report['data']['hash'])
                 binding.update(status='completed',pending=None,ack_revision=actual['revision']);engine.save()
             document_committed=True
+            if binding.get('document_tree'):data['document_tree']=copy.deepcopy(binding['document_tree'])
             card=document_card(payload['card'],binding['document_id'])
             card_hash=digest(card)
             prior_card_hash=data.get('card_payload_hash')
@@ -430,7 +467,7 @@ def publish_timeline(store, settings, report_id, confirm=False, transport=None, 
         return dict(data,publication_id=publication['id'])
 
 
-def adopt_timeline(store,settings,publication_id,confirm=False,title=None,transport=None,base=None,process=None):
+def adopt_timeline(store,settings,publication_id,confirm=False,title=None,transport=None,base=None,process=None,tree_journal=None):
     from .feishu import http,BASE,document_blocks_snapshot
     if not confirm:raise ValueError('adoption requires explicit --confirm')
     if title is not None and (type(title) is not str or not title.strip() or len(title)>200):
@@ -443,9 +480,10 @@ def adopt_timeline(store,settings,publication_id,confirm=False,title=None,transp
     destination=client.destination();key=binding_key(destination,original['project_id'])
     with store.claim(['doc:'+key,'publish:'+original['data']['identity']]):
         original=store.get(publication_id);data=original['data']
-        if data.get('layout_lock'):
+        if data.get('layout_lock') and not tree_journal:
             raise NeedsUser('locked document cannot be adopted by the flat timeline implementation')
-        if data['destination']!=destination or data['status']!='completed' or not data.get('document_id') or not data.get('message_id'):
+        if (data['destination']!=destination or data['status']!='completed' or data.get('pending') or data.get('outcome_unresolved') or
+                not data.get('document_id') or not data.get('message_id')):
             raise ValueError('adoption requires matching completed app document and card')
         migration=data.get('document_migration')
         if migration and migration['state']!='complete':raise ValueError('unfinished native migration cannot be adopted')
@@ -456,23 +494,36 @@ def adopt_timeline(store,settings,publication_id,confirm=False,title=None,transp
         source_id=data.get('document_report_id') or data['report_id'];source=store.get(source_id)
         if source['project_id']!=original['project_id']:raise ValueError('adoption source project mismatch')
         payload=preview(store,source_id)
-        actual=document_blocks_snapshot(client,data['document_id'])
-        if actual['ids']!=data['block_ids'] or actual['signatures']!=[block_signature(b) for b in payload['document']['children']] or actual['title']!=payload['document']['title']:
-            raise NeedsUser('adoption rejected: document differs from acknowledged report')
-        # Cross-check full root IDs; the page child array is not assumed paginated.
-        observe(client,data['document_id'],expected=data['block_ids'],title=actual['title'])
+        if tree_journal:
+            from .timeline_tree import adopt_surgery
+            actual=adopt_surgery(store,client,original,payload,tree_journal)
+        else:
+            if payload['document'].get('format'):
+                raise NeedsUser('native tree adoption requires an explicit acknowledged tree journal')
+            actual=document_blocks_snapshot(client,data['document_id'])
+            if actual['ids']!=data['block_ids'] or actual['signatures']!=[block_signature(b) for b in payload['document']['children']] or actual['title']!=payload['document']['title']:
+                raise NeedsUser('adoption rejected: document differs from acknowledged report')
+            observe(client,data['document_id'],expected=data['block_ids'],title=actual['title'])
         period=source['data']['period'];date.fromisoformat(period)
         with store.transaction():
             record=_new_binding(store,key,destination,original['project_id'],actual['title']);binding=record['data']
             binding.update(document_id=data['document_id'],order=[period],sections={period:{'block_ids':list(data['block_ids']),
-                'signatures':actual['signatures'],'report_id':source_id,'report_hash':source['data']['hash'],
-                'section_hash':digest(payload['document']['children'])}},ack_revision=actual['revision'],adopted_from=publication_id,
+                'signatures':actual.get('signatures',[]),'report_id':source_id,'report_hash':source['data']['hash'],
+                'section_hash':digest(payload['document'])}},ack_revision=actual['revision'],adopted_from=publication_id,
                 active_publication=publication_id,member_fingerprint=data.get('document_member_fingerprint'))
+            if tree_journal:
+                from .document_tree import FORMAT
+                section=binding['sections'][period]
+                section.update(block_ids=actual['ids'],tree=actual['nodes'])
+                binding.update(tree_mode=FORMAT,tree_adoption={'journal':actual['journal_path'],'journal_hash':actual['journal_hash'],
+                    'previous_layout_lock':data.get('layout_lock'),'publication_id':publication_id},
+                    document_tree={'format':FORMAT,'document_id':data['document_id'],'revision':actual['revision'],'nodes':actual['nodes']})
+                data.pop('layout_lock',None)
             data.update(layout='timeline',binding_id=key,binding_record_id=record['id'],adopted_block_ids=list(data['block_ids']),block_ids=[])
             store.update_record(record['id'],binding);store.update_record(publication_id,data)
             store.record('event',{'action':'timeline_adopted','publication_id':publication_id,'binding_id':key,
                 'document_id':data['document_id'],'block_ids':binding['sections'][period]['block_ids']},project_id=original['project_id'])
-        engine=Document(store,client,record)
+        engine=document_engine(store,client,record)
         try:
             renamed=engine.rename(title) if title is not None else False
         except BaseException as exc:
@@ -498,7 +549,7 @@ def rename_timeline(store,settings,ident,title,confirm=False,retry=False,transpo
         if binding['status'] not in {'completed','retry_authorized','failed'} or binding.get('operation'):
             raise ValueError('unresolved timeline operation; reconcile before rename')
         if binding['status']!='completed' and not retry:raise ValueError('title continuation requires explicit --retry')
-        engine=Document(store,client,record)
+        engine=document_engine(store,client,record)
         try:renamed=engine.rename(title)
         except BaseException as exc:
             engine.fail(exc)
@@ -542,9 +593,9 @@ def reconcile_timeline(store,settings,ident,resolution=None,reason=None,remote_i
             if binding.get('operation'):
                 view=operation_view(client,binding)
                 inspected['section']={'phase':view['phase'],'revision':view['revision'],'new_ids':view['new_ids'],
-                                      'content_hash':digest(view['signatures'])}
+                                      'content_hash':digest(view.get('nodes',view.get('signatures')))}
             else:
-                view=observe(client,document_id,expected=root_ids(binding))
+                view=binding_observe(client,dict(binding,document_id=document_id))
                 rename=binding.get('rename_request')
                 if view['title'] not in ([rename['old_title'],rename['new_title']] if rename else [binding['title']]):
                     raise NeedsUser('unexpected timeline title; refusing recovery')
@@ -558,7 +609,7 @@ def reconcile_timeline(store,settings,ident,resolution=None,reason=None,remote_i
         if not resolution:
             return {'binding_record_id':binding_record['id'],'binding':binding,'publication':publication['data'] if publication else None,
                     'inspection':inspected,'note':'GET only; no writes, resolution, retry or agent resume performed'}
-        engine=Document(store,client,binding_record)
+        engine=document_engine(store,client,binding_record)
         pending=binding.get('pending') or {}
         binding_unresolved = binding['status'] != 'completed' or bool(pending) or bool(binding.get('operation')) or bool(binding.get('rename_request'))
         if not document_id and pending.get('op')=='create_doc':
@@ -584,6 +635,7 @@ def reconcile_timeline(store,settings,ident,resolution=None,reason=None,remote_i
                 if initial['kind']=='publication' and resolution=='completed':
                     raise ValueError('resolve document via binding or retry_authorized; card must finish separately')
                 op=binding['operation'];op.update(new_ids=view['new_ids'],pending_batch_count=0,phase=view['phase'])
+                if op['kind']=='tree':engine.accept_view(view)
                 if op['kind']=='patch':op['patched']=view['patched']
                 if view['phase']=='complete':
                     section_event=engine.commit_section(view,persist=False);doc_complete=True

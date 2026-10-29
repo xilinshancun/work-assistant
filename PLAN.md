@@ -101,6 +101,19 @@ All live sending must be explicitly requested (`--confirm`, or an exact configur
 
 ## Tests and acceptance
 
+Native timeline trees use `wa.document.tree.v1` (`blocks`, callout `child_blocks`)
+without mixing local object arrays into official remote `children` ID arrays.
+The existing binding/publication locks and per-effect journal remain authoritative.
+Whole-tree pagination verifies every parent/child edge at a stable revision;
+target section signatures preserve native styles and links. New days never write
+historical nodes. Compatible callout parents and leaves retain IDs. Replacement
+creates and verifies new tool subtrees before deleting the old bounded range;
+user-adopted containers and preserved original children cannot be deleted.
+Explicit adoption of a completed surgery journal must match the stored tree ack,
+frozen report and live readback before clearing a layout lock. Unknown tree effects
+require GET-only inspection, explicit local resolution and separate --retry; no
+client-token retention or atomic revision CAS guarantee is assumed.
+
 Optional official CLI transport: `publisher.transport=lark_cli` supports app mode
 alongside the default HTTP adapter. Trusted local config pins `cli_argv`,
 `cli_config_dir`, optional `cli_profile`, and `expected_app_id`. Config-relative
