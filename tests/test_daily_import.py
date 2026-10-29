@@ -103,25 +103,24 @@ class DailyImportTests(Base):
         <section><h2>进展</h2><h3>详细结果</h3><p>原文条件：仅在合成环境观察到。</p>
         <ul><li><strong>事项：</strong>逐行理解 PR，尚未完成。</li></ul>
         <details><summary>补充说明</summary><p>折叠限定：仍需人工复核。</p></details></section></main>
-        <footer>底部导航</footer></body>"""
+        <footer><nav>底部导航</nav></footer></body>"""
         self.write_bundle(source)
         report = self.load(title="正式合成日报")
         files = self.files(report)
         document = json.loads(files["document.json"])
         self.assertEqual(document["title"], "正式合成日报")
-        self.assertEqual([b["block_type"] for b in document["children"]], [2, 4, 12, 12, 12, 4, 5, 2, 12, 4, 2])
+        self.assertEqual([b["block_type"] for b in document["children"]], [2, 2, 3, 4, 12, 12, 12, 4, 5, 2, 12, 4, 2])
         text = self.document_text(report)
-        self.assertEqual(text.count("覆盖区间："), 1)
-        self.assertIn("覆盖区间：2026-01-14 17:30 — 2026-01-15 17:30（Asia/Shanghai）", text)
-        for forbidden in ("合成源标题", "正式合成日报", "重复正文标题", "重复覆盖提示", "正文头部提示", "顶部导航", "底部导航"):
+        self.assertEqual(text.count("1月14日 17:30—1月15日 17:30 · 北京时间"), 1)
+        for forbidden in ("合成源标题", "正式合成日报", "重复覆盖提示", "顶部导航", "底部导航"):
             self.assertNotIn(forbidden, text)
-        for phrase in ("核心进展：完成合成检查，尚未独立复现。", "风险仍在，不能当作已解决。",
+        for phrase in ("正文头部提示", "重复正文标题", "核心进展：完成合成检查，尚未独立复现。", "风险仍在，不能当作已解决。",
                        "原文条件：仅在合成环境观察到。", "事项：逐行理解 PR，尚未完成。", "折叠限定：仍需人工复核。"):
             self.assertIn(phrase, text)
-        first = document["children"][2]["bullet"]["elements"]
+        first = document["children"][4]["bullet"]["elements"]
         self.assertEqual(first[0]["text_run"]["text_element_style"], {"bold": True})
         self.assertEqual(first[2]["text_run"]["text_element_style"], {"italic": True})
-        combined = document["children"][3]["bullet"]["elements"][1]["text_run"]
+        combined = document["children"][5]["bullet"]["elements"][1]["text_run"]
         self.assertEqual(combined["text_element_style"], {"bold": True, "italic": True})
         self.assertIn("<h2 class='source-line'>进展</h2>", files["index.html"])
         self.assertIn("<h3 class='source-line'>详细结果</h3>", files["index.html"])
@@ -171,6 +170,109 @@ class DailyImportTests(Base):
         with self.assertRaisesRegex(ValueError, "native block exceeds"):
             self.load()
         self.assertEqual(self.s.records("report"), [])
+
+    def test_native_rejects_visible_business_content_outside_main(self):
+        for fragment in ("<section><p>PR 尚未完成。</p></section>",
+                         "<article><header><p>PR 状态仍未确认。</p></header></article>",
+                         "<footer><p>业务限定：仍需复核。</p></footer>"):
+            with self.subTest(fragment=fragment):
+                self.write_bundle(HTML.replace("</main>", "</main>" + fragment))
+                with self.assertRaisesRegex(ValueError, "visible content outside main"):
+                    self.load()
+        self.assertEqual(self.s.records("report"), [])
+
+    def test_native_preserves_article_header_later_h1_and_h4_to_h6(self):
+        fragment = ("<article><header><p>PR 状态：尚未完成。</p></header><p>限定：未独立复现。</p></article>"
+                    "<h1>后续章节</h1><h4>四级标题</h4><h5>五级标题</h5><h6>六级标题</h6>")
+        self.write_bundle(HTML.replace("<h2>详细结果</h2>", fragment))
+        report = self.load()
+        blocks = preview(self.s, report["id"])["document"]["children"]
+        by_text = {daily_import.block_text(b): b["block_type"] for b in blocks}
+        self.assertEqual(by_text["PR 状态：尚未完成。"], 2)
+        self.assertEqual(by_text["限定：未独立复现。"], 2)
+        for text, number in (("后续章节", 3), ("四级标题", 6), ("五级标题", 7), ("六级标题", 8)):
+            self.assertEqual(by_text[text], number)
+        self.assertIn("<h6 class='source-line'>六级标题</h6>", self.files(report)["index.html"])
+        self.assertIn("###### 六级标题", self.files(report)["daily-sync.md"])
+
+    def test_native_standard_inline_elements_do_not_split_one_bullet(self):
+        fragment = ("<ul><li>状态<mark>仍待测</mark>，截止<time>17:30</time>，"
+                    "<abbr>PR</abbr>范围<label>仅合成</label>，命令<kbd>check</kbd>，"
+                    "<ins>新增计划</ins>待确认。</li></ul>")
+        self.write_bundle(HTML.replace("<h2>详细结果</h2>", fragment))
+        report = self.load()
+        expected = "状态仍待测，截止17:30，PR范围仅合成，命令check，新增计划待确认。"
+        matching = [b for b in preview(self.s, report["id"])["document"]["children"]
+                    if daily_import.block_text(b).startswith("状态")]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["block_type"], 12)
+        self.assertEqual(daily_import.block_text(matching[0]), expected)
+        runs = matching[0]["bullet"]["elements"]
+        self.assertTrue(next(e["text_run"] for e in runs if e["text_run"]["content"] == "check")
+                        ["text_element_style"]["inline_code"])
+
+    def test_native_rejects_unsupported_inline_semantics_without_flattening(self):
+        for tag in ("sup", "sub", "q", "custom-inline"):
+            with self.subTest(tag=tag):
+                fragment = "<ul><li>原文<%s>2</%s>仍待确认。</li></ul>" % (tag, tag)
+                self.write_bundle(HTML.replace("<h2>详细结果</h2>", fragment))
+                with self.assertRaisesRegex(ValueError, "unsupported HTML element"):
+                    self.load()
+        self.assertEqual(self.s.records("report"), [])
+
+    def test_native_table_cell_paragraphs_and_divs_have_boundaries(self):
+        fragment = "<table><tr><td><p>10</p><p>20</p></td><td><div>30</div><div>40</div></td></tr></table>"
+        self.write_bundle(HTML.replace("<h2>详细结果</h2>", fragment))
+        text = self.document_text(self.load())
+        self.assertIn("| 10; 20 | 30; 40", text)
+        self.assertNotIn("1020", text)
+        self.assertNotIn("3040", text)
+
+    def test_native_strikethrough_survives_document_card_and_previews(self):
+        fragment = "<h2>摘要</h2><p><s>已完成</s>，实际仍待测试。</p><p><del>风险已消除</del>，仍需复核。</p>"
+        self.write_bundle(HTML.replace("<h2>今日摘要</h2><p>完成合成检查，<strong>结论仍有限</strong>。</p>", fragment))
+        report = self.load()
+        files = self.files(report)
+        blocks = preview(self.s, report["id"])["document"]["children"]
+        for text in ("已完成", "风险已消除"):
+            block = next(b for b in blocks if daily_import.block_text(b).startswith(text))
+            self.assertTrue(block["bullet"]["elements"][0]["text_run"]["text_element_style"]["strikethrough"])
+            self.assertIn("<del>" + text + "</del>", files["index.html"])
+            self.assertIn("<del>" + text + "</del>", files["card-preview.html"])
+            self.assertIn("~~" + text + "~~", files["daily-sync.md"])
+        card = json.loads(files["card.json"])
+        self.assertIn("~~已完成~~", card["elements"][0]["text"]["content"])
+        self.assertEqual(card["elements"][2]["text"]["tag"], "lark_md")
+        self.assertIn("~~风险已消除~~", card["elements"][2]["text"]["content"])
+
+    def test_native_url_query_and_fragment_cannot_hide_local_paths(self):
+        normal = "https://example.invalid/home/page?next=/guides/intro#section"
+        self.assertEqual(daily_import.export_data(normal), normal)
+        urls = ["https://example.invalid/docs?path=/Users/alice/run.txt",
+                "https://example.invalid/docs#path=/Users/alice/run.txt",
+                "https://example.invalid/docs?path=%2FUsers%2Falice%2Frun.txt",
+                "https://example.invalid/docs#%252FUsers%252Falice%252Frun.txt",
+                "http://example.invalid/docs?path=C%3A%5Cprivate%5Crun.txt"]
+        for url in urls:
+            with self.subTest(url=url), self.assertRaisesRegex(ValueError, "local path"):
+                daily_import.export_data(url)
+
+    def test_native_coverage_is_natural_chinese_with_cross_year_and_other_zone(self):
+        stamp = daily_import._timestamp
+        self.assertEqual(daily_import.coverage_text(stamp("2026-10-28T17:30:15+08:00", "start"),
+                         stamp("2026-10-29T17:30:42+08:00", "end"), "Asia/Shanghai"),
+                         "10月28日 17:30—10月29日 17:30 · 北京时间")
+        self.assertEqual(daily_import.coverage_text(stamp("2025-12-31T17:30:00Z", "start"),
+                         stamp("2026-01-01T17:30:00Z", "end"), "UTC"),
+                         "2025年12月31日 17:30—2026年1月1日 17:30 · UTC")
+        self.evidence["covered_from"] = "2026-01-14T17:30:15+08:00"
+        self.evidence["covered_until"] = "2026-01-15T17:30:42+08:00"
+        self.state["daily"]["covered_until"] = self.evidence["covered_until"]
+        self.write_metadata()
+        report = self.load()
+        first = preview(self.s, report["id"])["document"]["children"][0]
+        self.assertEqual(daily_import.block_text(first), "1月14日 17:30—1月15日 17:30 · 北京时间")
+        self.assertEqual(report["data"]["coverage"]["covered_until"], "2026-01-15T17:30:42+08:00")
 
     def test_date_aliases_require_one_and_agree_when_both_present(self):
         for fields in ({"execution_date": PERIOD}, {"report_date": PERIOD},
@@ -363,8 +465,8 @@ class DailyImportTests(Base):
         self.assertIn("截至 01-15 17:30", files["card-preview.html"])
         snapshot = json.loads(files["evidence.json"])
         self.assertEqual(snapshot["summary"], "\n".join(["Sync 精简版"] + paragraphs))
-        self.assertIn("2026-01-14 17:30", self.document_text(report))
-        self.assertIn("2026-01-15 17:30", self.document_text(report))
+        self.assertIn("1月14日 17:30", self.document_text(report))
+        self.assertIn("1月15日 17:30", self.document_text(report))
         for paragraph in paragraphs:
             self.assertIn(paragraph, snapshot["body"])
             self.assertIn(paragraph, self.document_text(report))
@@ -470,7 +572,7 @@ class DailyImportTests(Base):
         self.assertEqual(payload["document"]["title"], "合成项目 · 每日进展")
         self.assertEqual(payload["card"]["header"]["title"]["content"], "合成项目 · 每日进展")
         self.assertIn("第二章节标题", json.loads(self.files(report)["evidence.json"])["body"])
-        self.assertNotIn("第二章节标题", self.document_text(report))
+        self.assertIn("第二章节标题", self.document_text(report))
         self.assertNotIn("隐藏标题", self.document_text(report))
 
     def test_identical_import_restores_missing_files_but_never_tampering(self):
@@ -508,7 +610,7 @@ class DailyImportTests(Base):
         self.assertNotIn("第一条中文详情", card_text)
         document = preview(self.s, report["id"])["document"]
         text = self.document_text(report)
-        for expected in ("2026-01-15", "第一条中文详情", "第二条限定", "折叠的完整细节", "尚未独立复现"):
+        for expected in ("1月15日 17:30", "第一条中文详情", "第二条限定", "折叠的完整细节", "尚未独立复现"):
             self.assertIn(expected, text)
         for forbidden in (daily_import.SCOPE, "证据摘要", "十个合成样本；仅为源陈述", "s1", "verified_at", "[REDACTED]"):
             self.assertNotIn(forbidden, text)
@@ -553,7 +655,7 @@ class DailyImportTests(Base):
         self.assertEqual(payload["document"]["title"], title)
         self.assertEqual(payload["card"]["header"]["title"]["content"], title)
         self.assertNotIn(title, self.document_text(updated))
-        self.assertTrue(daily_import.block_text(payload["document"]["children"][0]).startswith("覆盖区间："))
+        self.assertEqual(daily_import.block_text(payload["document"]["children"][0]), "1月14日 17:30—1月15日 17:30 · 北京时间")
         self.assertNotEqual(first["data"]["hash"], updated["data"]["hash"])
         self.assertEqual(first["data"]["period"], updated["data"]["period"])
         self.assertEqual(first["data"]["source_hashes"], updated["data"]["source_hashes"])

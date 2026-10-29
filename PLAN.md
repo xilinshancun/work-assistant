@@ -160,9 +160,17 @@ without active markup/navigation. Table cell/row boundaries and preformatted lin
 preserved; optional paragraph/list/table end tags are handled, and ambiguous nesting
 is rejected. Only the first visible h1 supplies the title. Seven escaped standard outputs and an ordinary
 immutable report record reuse the existing publisher identity/checkpoints. External documents put their single title in metadata, then one readable coverage
-line and native main content only (no source header/h1/navigation). h2/h3 map to
-heading2/heading3, li and summary p map to bullet, ordinary p to text, details summary
-to heading2. Source bold/italic and all qualifications remain intact. Maximum 1000
+line and native main content. Only the body-level title header and first title h1
+are removed; main article/header/footer and later h1 remain. Visible business content
+outside main is rejected instead of dropped. h1..h6 map to native heading1..heading6,
+li and summary p to bullet, ordinary p to text, details summary to heading2.
+Supported inline tags stay in their paragraph/list item; unsupported semantics
+(including sup/sub/q) are rejected. Cell child blocks retain explicit separators.
+Source bold/italic/strikethrough and all qualifications remain intact in native
+blocks/previews, with strikethrough also retained in cards/Markdown. Natural Chinese
+coverage uses 北京时间 for Asia/Shanghai, zone names elsewhere, and years across
+year boundaries; exact source timestamps stay in metadata. URL query/fragment
+local paths are checked after bounded percent decoding, without changing URL text. Maximum 1000
 blocks including coverage, 10000 characters/1000 runs per block; reject overflow.
 Local previews reproduce the native structure without executing source markup. Internal evidence
 and technical verification notes remain in local evidence.html/json only. Evidence
