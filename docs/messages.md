@@ -108,6 +108,44 @@ sender and chat; `verification_scope` explicitly excludes URL click-through and
 visual layout. The immutable source retains the exact sent URL/style payload.
 A differing readback remains `verification_pending`, never a new POST.
 
+## Update a known card in place
+
+```sh
+python3 -m work_assistant.messages --config private/config.local.json update-card ACTION_ID \
+  --request-id paseo:synthetic-session:original-update-request --card-file private/revision.json
+python3 -m work_assistant.messages --config private/config.local.json update-card ACTION_ID \
+  --request-id paseo:synthetic-session:original-update-request --card-file private/revision.json --confirm
+```
+
+The action must be the current completed/verified interactive-card receipt,
+including its original app and known chat ID (also for open_id recipients).
+Target/message IDs cannot be substituted by CLI arguments. Default is an offline
+preview. Confirmation authenticates the original app, reads the original private
+card and known remote message, and compares the readable `card_projection`,
+message type, sender, chat and deletion flag before PATCH. Mismatch or failed
+preflight produces a failed/not_updated action without PATCH. The existing GET
+projection cannot detect URL/style-only edits, and GET/PATCH is not atomic with
+external editors; avoid simultaneous manual edits. This is not pixel/URL verification.
+
+Each logical update needs its own stable request-id. Its request/payload locks
+and a shared app+message lock serialize updates/inspection. Before PATCH, one
+transaction stores the update intent/body hash, saves a supersession audit with
+the previous receipt, marks the old action `superseded`/`superseded_by`, and
+checkpoints the new action. Original payloads, UUIDs, hashes and message IDs are
+retained. Repeating the original send or inspecting the superseded action returns
+the historical/superseded receipt locally, never claims its text is current.
+Further updates use the latest verified action, not a superseded parent.
+
+The official [message patch model](https://github.com/larksuite/oapi-sdk-go/blob/v3_main/service/im/v1/model.go)
+accepts serialized card `content` at `PATCH /im/v1/messages/{message_id}`.
+This command never creates a new message POST. Every exception after PATCH intent
+is outcome_unknown; reentry with the same request-id never repeats PATCH, and a
+new ID cannot bypass the superseded/unresolved chain. `inspect` performs GET only:
+matching the new projection can complete an ambiguous applied update; otherwise
+it remains verification_pending. `resolve --absent` cannot declare the known
+existing message absent merely because an update was not observed. No automatic
+retry, UUID-window assumption or manual approval stage is added.
+
 Imported daily cards can use a trusted `publisher.card_signature` string (up to
 200 characters) in local config. This replaces the default footer verbatim,
 participates in the report hash, and does not change the document. Omit it to

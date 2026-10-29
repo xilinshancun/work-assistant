@@ -81,7 +81,8 @@ def _receipt(record, no_op=False):
     data = record["data"]
     fields = ("request_id", "status", "verification_status", "uuid", "receive_id_type", "receive_id",
               "text_sha256", "target_sha256", "expected_sender_app_id", "message_id", "chat_id",
-              "send_acknowledged", "checks", "error", "verified_at", "resolution", "msg_type", "verification_scope")
+              "send_acknowledged", "checks", "error", "verified_at", "resolution", "msg_type", "verification_scope",
+              "operation", "update_parent", "superseded_by", "pending")
     return dict({key: data.get(key) for key in fields}, action_id=record["id"], no_op=no_op)
 
 
@@ -117,9 +118,18 @@ def _recover(store, record):
         return _save(store, record, status="outcome_unknown", verification_status="unresolved",
                      error="interrupted_after_send_intent; inspect before any new authorization")
     if record["data"]["status"] == "preparing":
+        if record["data"].get("operation") == "update_card":
+            return _save(store, record, status="failed", verification_status="not_updated",
+                         error="interrupted_before_update; no PATCH started")
         return _save(store, record, status="failed", verification_status="not_sent",
                      error="interrupted_before_send; no message request started")
     return record
+
+
+def _remote_resources(data):
+    if data.get("message_id") and data.get("expected_sender_app_id"):
+        return ["message-remote:" + digest([data["expected_sender_app_id"], data["message_id"]])]
+    return []
 
 
 def _readback(store, record, client):
@@ -158,7 +168,8 @@ def _readback(store, record, client):
         record = _save(store, record, checks=checks, status="completed" if verified else "verification_pending",
                        verification_status="verified" if verified else "verification_pending",
                        error=None if verified else "readback_does_not_match_expected_message",
-                       verified_at=now() if verified else None, verification_scope=scope)
+                       verified_at=now() if verified else None, verification_scope=scope,
+                       **({"pending": None} if verified and data.get("operation") == "update_card" else {}))
     except BaseException as exc:
         record = _save(store, record, status="verification_pending", verification_status="verification_pending",
                        error="readback_unavailable_or_invalid; known sent ID retained; inspect only", verified_at=None, checks={})
@@ -195,7 +206,8 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
     with store.inspection_lock([resource, payload_resource]):
         record = _find(store, ident)
         if record and (record["data"]["request_id"] != request_id or record["data"]["target_sha256"] != target_hash
-                       or record["data"]["text_sha256"] != text_hash or record["data"].get("msg_type", "text") != msg_type):
+                       or record["data"]["text_sha256"] != text_hash or record["data"].get("msg_type", "text") != msg_type
+                       or record["data"].get("operation", "send") != "send"):
             raise MessageError("request-id already belongs to different target/content; do not replace it")
         if not confirm:
             return {"status": "dry_run", "action_id": ident, "request_id": request_id,
@@ -255,15 +267,100 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
         return _receipt(_readback(store, record, client))
 
 
+def update_card(store, settings, action_id, request_id, card_file, confirm=False,
+                transport=http, base=BASE, process=None):
+    """One explicit replacement of a known current card, never a new message POST."""
+    _settings(settings)
+    _id(action_id, "action ID")
+    _request(request_id)
+    if type(confirm) is not bool:
+        raise MessageError("confirm must be an explicit boolean")
+    text, raw = _text_file(card_file)
+    try:
+        card = parse_card(text)
+    except ValueError:
+        raise MessageError("card-file must be a supported display-only card") from None
+    original = _find(store, action_id)
+    if original is None:
+        raise MessageError("unknown outgoing message action ID")
+    old = original["data"]
+    if old.get("msg_type") != "interactive" or not old.get("message_id") or not old.get("chat_id") or not old.get("expected_sender_app_id"):
+        raise MessageError("update-card requires an original app/card/chat receipt")
+    ident, text_hash = _action_id(request_id), digest(raw)
+    resources = ["message:" + digest(request_id), "message:" + digest(old["request_id"]),
+                 "message-payload:" + digest([old["target_sha256"], text_hash])] + _remote_resources(old)
+    with store.inspection_lock(resources):
+        record = _find(store, ident)
+        if record and (record["data"].get("operation") != "update_card" or record["data"].get("update_parent") != action_id
+                       or record["data"]["text_sha256"] != text_hash):
+            raise MessageError("request-id already belongs to a different action/target/content")
+        if record:
+            return _receipt(_recover(store, record), no_op=True) if confirm else dict(_receipt(record), status="dry_run", confirm_required=True)
+        original = store.get(action_id)
+        old = original["data"]
+        if old["status"] != "completed" or old.get("verification_status") != "verified" or old.get("superseded_by"):
+            raise MessageError("update-card requires the current verified action; inspect unresolved or use superseding action")
+        if not confirm:
+            return {"status": "dry_run", "action_id": ident, "request_id": request_id, "update_parent": action_id,
+                    "message_id": old["message_id"], "chat_id": old["chat_id"], "text_sha256": text_hash,
+                    "card": card, "confirm_required": True}
+        artifact = _persist_text(store, ident, raw)
+        data = {key: old[key] for key in ("receive_id_type", "receive_id", "target_sha256", "expected_sender_app_id", "message_id", "chat_id")}
+        data.update(schema="wa.message.v1", operation="update_card", update_parent=action_id,
+                    request_id=request_id, uuid=str(uuid.uuid5(uuid.NAMESPACE_URL, "wa.update-card:" + request_id)),
+                    msg_type="interactive", text_sha256=text_hash, source_artifact=artifact, status="preparing",
+                    verification_status="not_updated", send_acknowledged=False, pending=None)
+        with store.transaction():
+            record = store.record(KIND, data, ident=ident)
+        try:
+            client = make_client(dict(settings), transport=transport, base=base, process=process)
+            if client.app_id() != old["expected_sender_app_id"]:
+                raise MessageError("update-card requires the original application identity")
+            client.authenticate()
+            checked = _readback(store, original, client)
+            if checked["data"]["status"] != "completed":
+                raise MessageError("original card readback differs or is unavailable; no update permitted")
+        except BaseException as exc:
+            record = _save(store, record, status="failed", verification_status="not_updated",
+                           error="update_preflight_failed; no PATCH started")
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            return _receipt(record)
+        path = "/im/v1/messages/" + quote(old["message_id"], safe="")
+        pending = {"method": "PATCH", "path": path, "body_hash": digest({"content": dumps(card)})}
+        with store.transaction():
+            store.record("message_update_intent", {"action_id": ident, "update_parent": action_id,
+                         "message_id": old["message_id"], "pending": pending, "text_sha256": text_hash})
+            store.record("message_supersession", {"action_id": action_id, "superseded_by": ident,
+                         "prior_state": checked["data"], "basis": "explicit_update_intent"})
+            store.update_record(action_id, dict(checked["data"], status="superseded", verification_status="superseded",
+                                               verified_at=None, superseded_by=ident))
+            store.update_record(ident, dict(record["data"], status="sending", verification_status="unresolved", pending=pending))
+        record = store.get(ident)
+        try:
+            client.request("PATCH", path, {"content": dumps(card)})
+            record = _save(store, record, send_acknowledged=True, pending=None,
+                           status="verification_pending", verification_status="verification_pending")
+        except BaseException as exc:
+            record = _save(store, record, status="outcome_unknown", verification_status="unresolved",
+                           error="update_outcome_unknown; inspect only; never automatically repeat PATCH")
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            return _receipt(record)
+        return _receipt(_readback(store, record, client))
+
+
 def inspect(store, settings, action_id, transport=http, base=BASE, process=None):
     _settings(settings)
     _id(action_id, "action ID")
     record = _find(store, action_id)
     if record is None:
         raise MessageError("unknown outgoing message action ID")
-    with store.inspection_lock(["message:" + digest(record["data"]["request_id"])]):
+    with store.inspection_lock(["message:" + digest(record["data"]["request_id"])] + _remote_resources(record["data"])):
         record = _recover(store, store.get(action_id))
-        if record["data"]["status"] == "resolved_absent" or not record["data"].get("message_id"):
+        if record["data"]["status"] in {"resolved_absent", "superseded"} or not record["data"].get("message_id"):
+            return _receipt(record, no_op=True)
+        if record["data"].get("operation") == "update_card" and record["data"]["status"] == "failed":
             return _receipt(record, no_op=True)
         client = make_client(dict(settings), transport=transport, base=base, process=process)
         if client.app_id() != record["data"]["expected_sender_app_id"]:
@@ -289,6 +386,8 @@ def resolve(store, action_id, absent=False, reason=None, confirm=False):
         # Re-read under both send locks: inspection or another resolver may have finished.
         record = store.get(action_id)
         data = record["data"]
+        if data.get("operation") == "update_card":
+            raise MessageError("update-card absence cannot resolve a known existing message; inspect the update action")
         if data["status"] not in {"outcome_unknown", "verification_pending"}:
             raise MessageError("absent resolution requires outcome_unknown or verification_pending")
         resolution = {"status": "resolved_absent", "basis": "operator_assertion",
@@ -358,6 +457,11 @@ def parser():
     modes.add_argument("--dry-run", action="store_true")
     command = commands.add_parser("inspect", help="Read the known sent message only; never resend")
     command.add_argument("action_id")
+    command = commands.add_parser("update-card", help="Replace one known verified card in place; never create a new message")
+    command.add_argument("action_id")
+    command.add_argument("--request-id", required=True)
+    command.add_argument("--card-file", required=True)
+    command.add_argument("--confirm", action="store_true")
     command = commands.add_parser("resolve", help="Record operator-confirmed absence locally; never query or resend")
     command.add_argument("action_id")
     command.add_argument("--absent", action="store_true", required=True)
@@ -381,6 +485,8 @@ def main(argv=None):
                                       args.text_file, confirm=args.confirm, card_file=args.card_file)
                     elif args.command == "resolve":
                         result = resolve(store, args.action_id, absent=args.absent, reason=args.reason, confirm=args.confirm)
+                    elif args.command == "update-card":
+                        result = update_card(store, conf["publisher"], args.action_id, args.request_id, args.card_file, confirm=args.confirm)
                     else:
                         result = inspect(store, conf["publisher"], args.action_id)
                 finally:
