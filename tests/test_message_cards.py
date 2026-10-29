@@ -4,7 +4,7 @@ import unittest
 import test_messages
 from unittest.mock import patch
 from work_assistant import messages
-from work_assistant.message_cards import card_projection
+from work_assistant.message_cards import card_projection, matches_card_projection
 from work_assistant.feishu import AmbiguousError
 
 
@@ -81,6 +81,68 @@ class CardTests(unittest.TestCase):
                                confirm=True, card_file=source, transport=self.card_transport(changed=True))
         self.assertEqual(result["status"], "verification_pending")
         self.assertEqual(result["message_id"], "om_fixture")
+
+    def test_inspect_accepts_exact_flattened_note_without_post_and_rejects_content_changes(self):
+        card = {"config": {"wide_screen_mode": True},
+                "header": {"template": "blue", "title": {"tag": "plain_text", "content": "快速回答"}},
+                "elements": [{"tag": "note", "elements": [{"tag": "plain_text", "content": "未查询项目状态 · 未执行操作"}]},
+                             {"tag": "hr"}, {"tag": "div", "text": {"tag": "plain_text", "content": "原文 **符号** 😀"}}]}
+        flat = {"title": "快速回答", "elements": [[{"tag": "text", "text": "未查询项目状态 · 未执行操作"}],
+                    [{"tag": "hr"}], [{"tag": "text", "text": "原文 **符号** 😀"}]]}
+        current = dict(flat, title="not yet verified")
+        calls = []
+        def request(method, path, body=None):
+            calls.append((method, path, copy.deepcopy(body)))
+            if method == "POST":
+                self.assertEqual(json.loads(body["content"]), card)
+                return {"message_id": "om_fixture", "chat_id": "oc_fixture"}
+            self.assertEqual((method, path), ("GET", "/im/v1/messages/om_fixture"))
+            return {"items": [{"message_id": "om_fixture", "chat_id": "oc_fixture", "msg_type": "interactive",
+                    "sender": {"id": "cli_fixture", "id_type": "app_id", "sender_type": "app"},
+                    "body": {"content": json.dumps(current)}}]}
+        client = type("Client", (), {"app_id": lambda _: "cli_fixture", "authenticate": lambda _: None})()
+        client.request = request
+        source = self.root / "note-card.json"; source.write_text(json.dumps(card))
+        with patch.object(messages, "make_client", return_value=client):
+            sent = messages.send(self.store, self.settings, "note-shape", "chat_id", "oc_fixture", None,
+                                 confirm=True, card_file=source)
+            self.assertEqual(sent["status"], "verification_pending")
+            current = copy.deepcopy(flat); count = len(calls)
+            verified = messages.inspect(self.store, self.settings, sent["action_id"])
+            self.assertEqual(verified["status"], "completed"); self.assertTrue(verified["checks"]["content"])
+            self.assertEqual(calls[count:], [("GET", "/im/v1/messages/om_fixture", None)])
+            self.assertEqual(verified["message_id"], sent["message_id"])
+            self.assertEqual(verified["text_sha256"], sent["text_sha256"])
+            bad = []
+            wrong = copy.deepcopy(flat); wrong["elements"][0][0]["text"] += " wrong"; bad.append(wrong)
+            missing = copy.deepcopy(flat); missing["elements"].pop(0); bad.append(missing)
+            reordered = copy.deepcopy(flat); reordered["elements"].reverse(); bad.append(reordered)
+            extra = copy.deepcopy(flat); extra["elements"][0].append({"tag": "text", "text": "extra"}); bad.append(extra)
+            whitespace = copy.deepcopy(flat); whitespace["elements"][0][0]["text"] += " "; bad.append(whitespace)
+            wrong_tag = copy.deepcopy(flat); wrong_tag["elements"][0][0]["tag"] = "note"; bad.append(wrong_tag)
+            bad.append(dict(flat, extra="ignored field must not be accepted"))
+            for current in bad:
+                with self.subTest(content=current):
+                    count = len(calls)
+                    pending = messages.inspect(self.store, self.settings, sent["action_id"])
+                    self.assertEqual(pending["status"], "verification_pending")
+                    self.assertFalse(pending["checks"]["content"])
+                    self.assertEqual(calls[count:], [("GET", "/im/v1/messages/om_fixture", None)])
+        self.assertEqual(sum(call[0] == "POST" for call in calls), 1)
+
+    def test_note_normalization_preserves_existing_wrapped_markdown_card_and_all_note_texts(self):
+        self.assertTrue(matches_card_projection(CARD, PROJECTION))
+        flat = copy.deepcopy(PROJECTION)
+        flat["elements"][-1] = flat["elements"][-1][0]["elements"]
+        self.assertTrue(matches_card_projection(CARD, flat))
+        card = copy.deepcopy(CARD)
+        card["elements"][-1]["elements"].append({"tag": "plain_text", "content": "Second note"})
+        projection = card_projection(card)
+        projection["elements"][-1] = projection["elements"][-1][0]["elements"]
+        self.assertTrue(matches_card_projection(card, projection))
+        for row in (projection["elements"][-1][::-1], projection["elements"][-1][:1]):
+            changed = copy.deepcopy(projection); changed["elements"][-1] = row
+            self.assertFalse(matches_card_projection(card, changed))
 
     def test_card_dryrun_and_unsafe_callback_target_rejected(self):
         result = self.card_send(confirm=False)

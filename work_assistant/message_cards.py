@@ -70,3 +70,21 @@ def parse_card(raw):
     card = strict_json(raw)
     card_projection(card)
     return card
+
+
+def matches_card_projection(card, content):
+    """Match exact readable rows, permitting the observed plain-text note flattening."""
+    expected = card_projection(card)
+    if (type(content) is not dict or set(content) != {"title", "elements"}
+            or content["title"] != expected["title"] or type(content["elements"]) is not list
+            or len(content["elements"]) != len(expected["elements"])):
+        return False
+    for source, row, actual in zip(card["elements"], expected["elements"], content["elements"]):
+        if actual == row:
+            continue
+        # A note's plain_text elements may be returned as a row of text objects,
+        # without the note wrapper. Keep every text and its original row/order.
+        if source["tag"] == "note" and actual == row[0]["elements"]:
+            continue
+        return False
+    return True

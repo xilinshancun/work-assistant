@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from . import config
-from .message_cards import parse_card, card_projection
+from .message_cards import parse_card, card_projection, matches_card_projection
 from .feishu import APIError, AmbiguousError, BASE, http, make_client
 from .process import TerminationRequested, termination_guard
 from .store import Busy, Store
@@ -180,7 +180,7 @@ def _readback(store, record, client, persist=True):
                              and sender.get("id_type") == ("open_id" if user else "app_id")
                              and sender.get("id") == data.get("expected_sender_user_open_id" if user else "expected_sender_app_id")),
                   "chat": bool(data.get("chat_id")) and message.get("chat_id") == data["chat_id"],
-                  "content": (content == card_projection(card) or content == card) if card is not None else (type(content) is dict and set(content) == {"text"} and content["text"] == expected),
+                  "content": (matches_card_projection(card, content) or content == card) if card is not None else (type(content) is dict and set(content) == {"text"} and content["text"] == expected),
                   "msg_type": message.get("msg_type") == data.get("msg_type", "text"),
                   "not_deleted": message.get("deleted", False) is False}
         if card is None:
