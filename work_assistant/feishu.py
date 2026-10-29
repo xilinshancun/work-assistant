@@ -13,6 +13,113 @@ from .reports import load_report
 from .util import dumps, digest, redact
 
 BASE = "https://open.feishu.cn/open-apis"
+# Official schema: larksuite/oapi-sdk-go/service/docx/v1/model.go (Block,
+# TextElementStyle, UpdateBlockRequest, BatchDeleteDocumentBlockChildrenReq).
+TEXT_BLOCKS = {2: "text", 12: "bullet", 13: "ordered"}
+TEXT_BLOCKS.update({level + 2: "heading%s" % level for level in range(1, 10)})
+
+
+def block_text(block):
+    kind = block.get("block_type") if type(block) is dict else None
+    if type(kind) is not int or kind not in TEXT_BLOCKS or type(block.get(TEXT_BLOCKS[kind])) is not dict:
+        raise APIError("unsupported native document text block")
+    text = block[TEXT_BLOCKS[kind]]
+    if type(text.get("elements")) is not list or not text["elements"]:
+        raise APIError("native document block needs text elements")
+    return text
+
+
+def block_signature(block):
+    """Compare rendered text/styles while accepting server-supplied defaults."""
+    text = block_text(block)
+    if block.get("children") or block.get("comment_ids"):
+        raise APIError("document has nested blocks or comments; refusing replacement")
+    runs = []
+    for element in text["elements"]:
+        if type(element) is not dict or set(element) != {"text_run"} or type(element["text_run"]) is not dict:
+            raise APIError("unsupported native inline element; refusing replacement")
+        run = element["text_run"]
+        if type(run.get("content")) is not str or set(run) - {"content", "text_element_style"}:
+            raise APIError("invalid native text run")
+        style = dict(run.get("text_element_style") or {})
+        for key in ("bold", "italic", "strikethrough", "underline", "inline_code"):
+            if key in style and type(style[key]) is not bool:
+                raise APIError("native inline style must use booleans")
+            if style.get(key) is False:
+                del style[key]
+        for key in ("background_color", "text_color"):
+            if type(style.get(key)) is int and style[key] == 0:
+                del style[key]
+        if runs and runs[-1]["style"] == style:
+            runs[-1]["content"] += run["content"]
+        else:
+            runs.append({"content": run["content"], "style": style})
+    style = dict(text.get("style") or {})
+    for key, default in (("align", 1), ("folded", False)):
+        if type(style.get(key)) is type(default) and style[key] == default:
+            del style[key]
+    return {"block_type": block["block_type"], "elements": runs, "style": style}
+
+
+def document_blocks_snapshot(client, document_id):
+    """Read every direct child at a stable revision; never resumes a mutation."""
+    doc = urllib.parse.quote(document_id, safe="")
+    metadata = client.request("GET", "/docx/v1/documents/" + doc).get("document", {})
+    revision = metadata.get("revision_id")
+    if type(revision) is not int or revision < 1:
+        raise APIError("document revision unavailable; refusing replacement")
+    blocks, token, seen = [], None, set()
+    for _ in range(100):
+        query = {"document_revision_id": "-1", "page_size": "200"}
+        if token:
+            query["page_token"] = token
+        page = client.request("GET", "/docx/v1/documents/%s/blocks/%s/children?" % (doc, doc) + urllib.parse.urlencode(query))
+        if type(page.get("items")) is not list or type(page.get("has_more")) is not bool:
+            raise APIError("invalid document child pagination")
+        blocks += page["items"]
+        if len(blocks) > 2000:
+            raise APIError("document exceeds replacement inspection bound")
+        if not page["has_more"]:
+            break
+        token = page.get("page_token")
+        if type(token) is not str or not token or token in seen:
+            raise APIError("invalid document child page token")
+        seen.add(token)
+    else:
+        raise APIError("document pagination incomplete")
+    after = client.request("GET", "/docx/v1/documents/" + doc).get("document", {})
+    if after.get("revision_id") != revision or after.get("title") != metadata.get("title"):
+        raise APIError("document changed during inspection; refusing replacement")
+    ids = [b.get("block_id") for b in blocks if type(b) is dict]
+    if (len(ids) != len(blocks) or any(type(i) is not str or not i for i in ids) or
+            len(set(ids)) != len(ids) or any(b.get("parent_id") != document_id for b in blocks)):
+        raise APIError("unexpected or duplicate document child IDs")
+    return {"revision": revision, "title": metadata.get("title"), "ids": ids,
+            "signatures": [block_signature(b) for b in blocks]}
+
+
+def migration_observation(store, client, data):
+    migration = data["document_migration"]
+    source = preview(store, migration["source_report_id"])["document"]
+    target = preview(store, migration["target_report_id"])["document"]
+    if digest(source) != migration["source_hash"] or digest(target) != migration["target_hash"]:
+        raise APIError("migration immutable document hash mismatch")
+    actual = document_blocks_snapshot(client, data["document_id"])
+    old_ids, new_ids = migration["old_block_ids"], migration["new_block_ids"]
+    old = [block_signature(b) for b in source["children"]]
+    new = [block_signature(b) for b in target["children"]]
+    if actual["title"] != source["title"]:
+        raise APIError("document title was edited; refusing replacement")
+    ids, signatures = actual["ids"], actual["signatures"]
+    if ids == new_ids and len(new_ids) == len(new) and signatures == new:
+        return dict(actual, state="complete", new_block_ids=new_ids)
+    count = len(ids) - len(old_ids)
+    if (0 <= count <= len(new) and ids[:len(old_ids)] == old_ids and
+            ids[len(old_ids):len(old_ids) + len(new_ids)] == new_ids and
+            len(new_ids) <= count <= len(new_ids) + migration.get("pending_batch_count", 0) and signatures == old + new[:count]):
+        return dict(actual, state="appending" if count < len(new) else "ready_delete",
+                    new_block_ids=ids[len(old_ids):])
+    raise APIError("document IDs/content/styles differ from acknowledged migration; inspect user edits")
 
 
 def document_settings(settings):
@@ -135,6 +242,8 @@ def preview(store, report_id):
     if (type(card.get("elements")) is not list or not card["elements"] or
             type(document.get("children")) is not list or not document["children"]):
         raise ValueError("invalid card/document payload")
+    for block in document["children"]:
+        block_signature(block)
     return {"status": "dry_run", "report": report_id, "hash": report["data"]["hash"], "path": str(root),
             "card": card, "document": document, "note": "local preview only; webhook supports cards only; no network requests"}
 
@@ -196,9 +305,18 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
         if prior and data["mode"] == "webhook" and data.get("hash") != payload["hash"] and data.get("status") == "completed":
             raise ValueError("webhook cannot update prior cards; use app mode for period updates")
         document_hash = digest(payload["document"])
+        acknowledged_report = data.get("document_report_id")
+        previous_attempt_report = data.get("report_id")
+        if not acknowledged_report and data.get("status") == "completed":
+            acknowledged_report = data.get("report_id")
         prior_document_hash = data.get("document_payload_hash")
-        if not prior_document_hash and data.get("status") == "completed" and data.get("report_id"):
-            prior_document_hash = digest(preview(store, data["report_id"])["document"])
+        if not prior_document_hash and acknowledged_report:
+            prior_document_hash = digest(preview(store, acknowledged_report)["document"])
+        if acknowledged_report and data.get("document_id"):
+            data.update(document_report_id=acknowledged_report, document_payload_hash=prior_document_hash)
+        migration = data.get("document_migration")
+        if migration and migration.get("recovery_required"):
+            raise ValueError("migration outcome unknown; explicit retry_authorized reconciliation required")
         data.update(status="publishing", hash=payload["hash"], report_hash=report_hash, report_id=report_id, pending=None)
         data.pop("error", None)
         data.pop("authentication_incomplete", None)
@@ -220,6 +338,81 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
             data["steps"] = data["steps"] + [{"stage": stage, "body_hash": digest(body)}]
             data["pending"] = None
             return result
+
+        def migrate_document(source_report):
+            nonlocal migration
+            target = payload["document"]
+            if not migration or migration["state"] == "complete":
+                source = preview(store, source_report)["document"]
+                actual = document_blocks_snapshot(client, data["document_id"])
+                if (source["title"] != target["title"] or actual["title"] != source["title"] or
+                        actual["ids"] != data["block_ids"] or
+                        actual["signatures"] != [block_signature(b) for b in source["children"]]):
+                    raise APIError("document IDs/content/styles/title differ from acknowledged report; refusing replacement")
+                migration = {"id": str(uuid.uuid4()), "state": "appending", "source_report_id": source_report,
+                    "target_report_id": report_id, "source_hash": digest(source), "target_hash": document_hash,
+                    "old_block_ids": list(data["block_ids"]), "new_block_ids": [], "pending_batch_count": 0,
+                    "initial_revision": actual["revision"], "last_ack_revision": actual["revision"],
+                    "concurrency_scope": "read checks only; document_revision_id is not atomic compare-and-swap"}
+                data["document_migration"] = migration
+                checkpoint()
+            if migration["target_hash"] != document_hash:
+                raise APIError("finish or reconcile the existing migration before changing its target")
+            observation = migration_observation(store, client, data)
+            if observation["new_block_ids"] != migration["new_block_ids"]:
+                raise APIError("unacknowledged migration IDs require explicit reconciliation")
+            if migration.get("last_ack_revision") is not None and observation["revision"] != migration["last_ack_revision"]:
+                raise APIError("document revision changed since migration checkpoint; inspect before continuing")
+            revision = observation["revision"]
+            doc = urllib.parse.quote(data["document_id"], safe="")
+            while observation["state"] != "complete" and len(migration["new_block_ids"]) < len(target["children"]):
+                offset = len(migration["new_block_ids"])
+                batch = target["children"][offset:offset + 50]
+                token = str(uuid.uuid5(uuid.UUID(migration["id"]), "append:%s" % offset))
+                migration.update(state="appending", pending_batch_count=len(batch), append_client_token=token)
+                checkpoint()
+                query = urllib.parse.urlencode({"document_revision_id": revision, "client_token": token})
+                result = effect("migration_append:%s" % offset, "POST",
+                    "/docx/v1/documents/%s/blocks/%s/children?%s" % (doc, doc, query), {"children": batch, "index": -1})
+                created = result.get("children", [])
+                ids = [b.get("block_id") for b in created if type(b) is dict]
+                if (len(ids) != len(batch) or any(type(i) is not str or not i for i in ids) or
+                        len(set(ids)) != len(ids) or set(ids) & set(migration["old_block_ids"] + migration["new_block_ids"])):
+                    raise AmbiguousError("migration append response missing unique IDs; inspect before retry")
+                revision = result.get("document_revision_id")
+                revision = revision if type(revision) is int and revision > 0 else None
+                migration.update(new_block_ids=migration["new_block_ids"] + ids, pending_batch_count=0,
+                                 last_ack_revision=revision)
+                checkpoint()
+                if revision is None:
+                    observation = migration_observation(store, client, data)
+                    revision = observation["revision"]
+            observation = migration_observation(store, client, data)
+            if observation["state"] != "complete":
+                if observation["state"] != "ready_delete" or observation["new_block_ids"] != migration["new_block_ids"]:
+                    raise APIError("migration is not ready for old-block removal")
+                if migration.get("last_ack_revision") is not None and observation["revision"] != migration["last_ack_revision"]:
+                    raise APIError("document changed after native append; refusing deletion")
+                token = str(uuid.uuid5(uuid.UUID(migration["id"]), "delete-old"))
+                migration.update(state="ready_delete", verified_delete_revision=observation["revision"], delete_client_token=token)
+                checkpoint()
+                # The API revision is not CAS: a concurrent edit after this read
+                # cannot be atomically excluded. Preserve that limitation explicitly.
+                query = urllib.parse.urlencode({"document_revision_id": observation["revision"], "client_token": token})
+                result = effect("migration_delete_old", "DELETE",
+                    "/docx/v1/documents/%s/blocks/%s/children/batch_delete?%s" % (doc, doc, query),
+                    {"start_index": 0, "end_index": len(migration["old_block_ids"])})
+                revision = result.get("document_revision_id")
+                migration.update(state="verifying_new", last_ack_revision=revision if type(revision) is int and revision > 0 else None)
+                checkpoint()
+                observation = migration_observation(store, client, data)
+            if observation["state"] != "complete":
+                raise APIError("migration post-delete content/IDs mismatch; card was not updated")
+            if migration.get("last_ack_revision") is not None and observation["revision"] != migration["last_ack_revision"]:
+                raise APIError("document changed before migration verification completed")
+            migration.update(state="complete", verified_revision=observation["revision"])
+            data["block_ids"] = list(migration["new_block_ids"])
+            checkpoint()
 
         try:
             if settings["mode"] == "webhook":
@@ -256,11 +449,24 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
                         checkpoint()
                 children = payload["document"]["children"]
                 update_document = prior_document_hash != document_hash
+                source_document = preview(store, acknowledged_report)["document"] if update_document and acknowledged_report else None
+                if source_document and source_document["title"] != payload["document"]["title"]:
+                    raise APIError("document metadata title change requires a separate explicit operation")
+                type_change = source_document and (len(children) < len(source_document["children"]) or any(
+                    old["block_type"] != new["block_type"] or block_signature(old)["style"] != block_signature(new)["style"]
+                    for old, new in zip(source_document["children"], children)))
+                active_migration = migration and migration["state"] != "complete"
+                if (data["block_ids"] and not source_document and not active_migration and
+                        previous_attempt_report != report_id and any(b["block_type"] != 2 for b in children)):
+                    raise APIError("native update requires the previous acknowledged document snapshot")
+                if active_migration or (type_change and data["block_ids"]):
+                    migrate_document(acknowledged_report)
+                    update_document = False
                 for index, block in enumerate(children if update_document else []):
                     if index < len(data["block_ids"]):
                         block_id = urllib.parse.quote(data["block_ids"][index], safe="")
                         effect("update_block:%s" % index, "PATCH", "/docx/v1/documents/%s/blocks/%s" % (doc, block_id),
-                               {"update_text_elements": {"elements": block["text"]["elements"]}})
+                               {"update_text_elements": {"elements": block_text(block)["elements"]}})
                     else:
                         result = effect("create_block:%s" % index, "POST", "/docx/v1/documents/%s/blocks/%s/children" % (doc, doc),
                                         {"children": [block], "index": index})
@@ -302,6 +508,8 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
                 data.update(status="outcome_unknown", error="request interrupted or response ambiguous; inspect before retry")
                 if (data.get("pending") or {}).get("stage") == "share_document_member":
                     data["document_member_status"] = "outcome_unknown"
+                if migration and migration.get("state") != "complete":
+                    migration["recovery_required"] = True
             checkpoint()
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -329,6 +537,8 @@ def reconcile(store, settings, ident, resolution=None, reason=None, remote_ids=N
             data["document_member_status"] = "outcome_unknown"
         if remote_ids is not None and not resolution:
             raise ValueError("remote confirmations require an explicit resolution and reason")
+        if remote_ids is not None and type(remote_ids) is not dict:
+            raise ValueError("remote IDs must be an object")
         inspected = {}
         if data.get("document_id"):
             doc = urllib.parse.quote(data["document_id"], safe="")
@@ -336,9 +546,29 @@ def reconcile(store, settings, ident, resolution=None, reason=None, remote_ids=N
             inspected["content"] = client.request("GET", "/docx/v1/documents/" + doc + "/raw_content")
         if data.get("message_id"):
             inspected["message"] = client.request("GET", "/im/v1/messages/" + urllib.parse.quote(data["message_id"], safe=""))
+        migration = data.get("document_migration")
+        observation = None
+        if migration and migration.get("state") != "complete":
+            observation = migration_observation(store, client, data)
+            inspected["migration"] = {"state": observation["state"], "revision": observation["revision"],
+                "old_block_ids": migration["old_block_ids"], "new_block_ids": observation["new_block_ids"],
+                "content_hash": digest(observation["signatures"]),
+                "note": "read-only comparison; explicit resolution required before continuing"}
         if resolution:
             if resolution not in {"completed", "retry_authorized", "cancelled"} or not reason or not reason.strip():
                 raise ValueError("explicit resolution requires a valid status and reason")
+            if observation and resolution in {"retry_authorized", "completed"}:
+                if resolution == "completed" and observation["state"] != "complete":
+                    raise ValueError("partial document migration cannot be marked completed")
+                if remote_ids and (remote_ids.get("document_id", data["document_id"]) != data["document_id"] or
+                        remote_ids.get("block_ids", observation["new_block_ids"] if observation["state"] == "complete" else migration["old_block_ids"]) !=
+                        (observation["new_block_ids"] if observation["state"] == "complete" else migration["old_block_ids"])):
+                    raise ValueError("migration remote IDs must match the read-only inspected document")
+                migration.update(state=observation["state"], new_block_ids=observation["new_block_ids"],
+                    pending_batch_count=0, last_ack_revision=observation["revision"], recovery_required=False)
+                if observation["state"] == "complete":
+                    data.update(block_ids=list(observation["new_block_ids"]), document_payload_hash=migration["target_hash"],
+                                document_report_id=migration["target_report_id"])
             if remote_ids:
                 if type(remote_ids) is not dict or set(remote_ids) - {"document_id", "message_id", "block_ids", "document_member_granted"}:
                     raise ValueError("invalid remote ID mapping")
