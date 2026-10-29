@@ -150,6 +150,24 @@ it remains verification_pending. `resolve --absent` cannot declare the known
 existing message absent merely because an update was not observed. No automatic
 retry, UUID-window assumption or manual approval stage is added.
 
+If an ambiguous update is observed not to have applied, use the separate explicit
+GET-only resolution (default preview; no remote writes):
+
+```sh
+python3 -m work_assistant.messages --config private/config.local.json resolve-update UPDATE_ACTION_ID \
+  --not-applied --reason 'Operator confirmed that the update was not applied.' --confirm
+```
+
+This requires distinct old/new readable projections, exact parent content,
+original app/chat identity and a still-unresolved current update. It appends an
+operator-assertion audit, marks the update `not_applied` and restores the parent
+as the current readable-content receipt. It does not claim that GET proved URL
+or style absence. Original update request IDs remain no-op; a new update requires
+new explicit authorization and request-id. If the new projection is present,
+`inspect` can finish instead. If projections are equal (for example URL/style-only
+changes), an unknown update remains `needs_user`: GET cannot distinguish the
+outcomes, and no automatic completion/restoration or PATCH occurs.
+
 Imported daily cards can use a trusted `publisher.card_signature` string (up to
 200 characters) in local config. This replaces the default footer verbatim,
 participates in the report hash, and does not change the document. Omit it to

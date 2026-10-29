@@ -20,7 +20,7 @@ from .util import digest, dumps, now, outbound_guard, strict_json
 
 MAX_TEXT_BYTES = 16 * 1024
 KIND = "outgoing_message"
-UNRESOLVED = {"preparing", "sending", "outcome_unknown", "verification_pending"}
+UNRESOLVED = {"preparing", "sending", "outcome_unknown", "verification_pending", "needs_user"}
 
 
 class MessageError(ValueError):
@@ -167,13 +167,18 @@ def _readback(store, record, client, persist=True):
         if card is None:
             checks["text"] = checks.pop("content")
         verified = all(checks.values())
+        indistinguishable = (data.get('operation') == 'update_card' and bool(data.get('pending'))
+                             and data.get('previous_projection_hash') == digest(card_projection(card))) if card else False
+        if indistinguishable:
+            verified = False
         scope = "readable_card_content_identity_and_chat; URLs/styles retained in sent payload, not independently verified by GET" if card is not None else "exact_text_identity_and_chat"
-        record = save(checks=checks, status="completed" if verified else "verification_pending",
+        record = save(checks=checks, status="needs_user" if indistinguishable else "completed" if verified else "verification_pending",
                        verification_status="verified" if verified else "verification_pending",
-                       error=None if verified else "readback_does_not_match_expected_message",
+                       error="readable projections indistinguishable; URL/style update outcome cannot be proved by GET" if indistinguishable else None if verified else "readback_does_not_match_expected_message",
                        verified_at=now() if verified else None, verification_scope=scope,
                        **({"pending": None} if verified and data.get("operation") == "update_card" else {}),
-                       readback_create_time=message.get("create_time"), card_update_multi=card["config"].get("update_multi") if card else None)
+                       readback_create_time=message.get("create_time"), card_update_multi=card["config"].get("update_multi") if card else None,
+                       readable_card_hash=digest(card_projection(card)) if card else None)
     except BaseException as exc:
         record = save(status="verification_pending", verification_status="verification_pending",
                        error="readback_unavailable_or_invalid; known sent ID retained; inspect only", verified_at=None, checks={})
@@ -350,7 +355,8 @@ def update_card(store, settings, action_id, request_id, card_file, confirm=False
                          "prior_state": checked["data"], "basis": "explicit_update_intent"})
             store.update_record(action_id, dict(checked["data"], status="superseded", verification_status="superseded",
                                                verified_at=None, superseded_by=ident))
-            store.update_record(ident, dict(record["data"], status="sending", verification_status="unresolved", pending=pending))
+            store.update_record(ident, dict(record["data"], status="sending", verification_status="unresolved", pending=pending,
+                                           previous_projection_hash=checked['data']['readable_card_hash']))
         record = store.get(ident)
         try:
             client.request("PATCH", path, {"content": dumps(card)})
@@ -373,7 +379,7 @@ def inspect(store, settings, action_id, transport=http, base=BASE, process=None)
         raise MessageError("unknown outgoing message action ID")
     with store.inspection_lock(["message:" + digest(record["data"]["request_id"])] + _remote_resources(record["data"])):
         record = _recover(store, store.get(action_id))
-        if record["data"]["status"] in {"resolved_absent", "superseded"} or not record["data"].get("message_id"):
+        if record["data"]["status"] in {"resolved_absent", "superseded", "not_applied"} or not record["data"].get("message_id"):
             return _receipt(record, no_op=True)
         if record["data"].get("operation") == "update_card" and record["data"]["status"] == "failed":
             return _receipt(record, no_op=True)
@@ -381,6 +387,52 @@ def inspect(store, settings, action_id, transport=http, base=BASE, process=None)
         if client.app_id() != record["data"]["expected_sender_app_id"]:
             raise MessageError("inspect requires the original application identity")
         return _receipt(_readback(store, record, client))
+
+
+def resolve_update(store, settings, action_id, reason, confirm=False, transport=http, base=BASE, process=None):
+    """Explicit local not-applied resolution; GET only, never PATCH or POST."""
+    _settings(settings)
+    _id(action_id, 'action ID')
+    if (type(confirm) is not bool or type(reason) is not str or not reason.strip() or len(reason)>2000
+            or any(ord(c)<32 and c not in '\n\r\t' for c in reason)):
+        raise MessageError('resolution requires boolean confirm and a nonempty reason (max 2000 characters)')
+    action = _find(store, action_id)
+    if action is None or action['data'].get('operation') != 'update_card':
+        raise MessageError('resolve-update requires an update-card action')
+    parent = store.get(action['data']['update_parent'])
+    resources = ['message:'+digest(action['data']['request_id']), 'message:'+digest(parent['data']['request_id'])] + _remote_resources(action['data'])
+    with store.inspection_lock(resources):
+        action, parent = store.get(action_id), store.get(parent['id'])
+        data = action['data']
+        if (data['status'] not in {'sending','outcome_unknown','verification_pending','needs_user'}
+                or parent['data'].get('superseded_by') != action_id or parent['data']['status'] != 'superseded'):
+            raise MessageError('resolution requires the current unresolved update and its superseded parent')
+        client = make_client(dict(settings), transport=transport, base=base, process=process)
+        if client.app_id() != data['expected_sender_app_id']:
+            raise MessageError('resolution requires the original application identity')
+        new = _readback(store, action, client, persist=False)['data']
+        old = _readback(store, parent, client, persist=False)['data']
+        if not new.get('readable_card_hash') or not old.get('readable_card_hash') or new['readable_card_hash'] == old['readable_card_hash']:
+            raise MessageError('indistinguishable projections; GET cannot prove URL/style outcome; keep needs_user')
+        if new['status'] == 'completed':
+            raise MessageError('new projection matches; use inspect to complete, not not-applied resolution')
+        if old['status'] != 'completed':
+            raise MessageError('parent projection/identity/chat not verified; no restoration permitted')
+        resolution = {'status':'not_applied', 'reason':reason, 'basis':'operator_assertion_with_readable_parent_match',
+                      'scope':'readable content/identity/chat only; URL/style absence is not verified by GET'}
+        if not confirm:
+            return dict(_receipt(action),status='dry_run',proposed_resolution=resolution,confirm_required=True)
+        resolution['resolved_at'] = now()
+        with store.transaction():
+            store.record('message_update_resolution',{'action_id':action_id,'parent_id':parent['id'],
+                         'resolution':resolution,'prior_state':data,'parent_prior_state':parent['data'],
+                         'parent_readback_checks':old['checks']})
+            store.update_record(action_id,dict(data,status='not_applied',verification_status='operator_confirmed_not_applied',
+                                               resolution=resolution,pending=None))
+            restored = dict(parent['data'],status='completed',verification_status='verified',superseded_by=None,
+                            restored_by=action_id,verified_at=old['verified_at'],verification_scope=old['verification_scope'])
+            store.update_record(parent['id'],restored)
+        return _receipt(store.get(action_id))
 
 
 def resolve(store, action_id, absent=False, reason=None, confirm=False):
@@ -477,6 +529,11 @@ def parser():
     command.add_argument("--request-id", required=True)
     command.add_argument("--card-file", required=True)
     command.add_argument("--confirm", action="store_true")
+    command = commands.add_parser('resolve-update', help='GET-only inspection and explicit local not-applied resolution')
+    command.add_argument('action_id')
+    command.add_argument('--not-applied', action='store_true', required=True)
+    command.add_argument('--reason', required=True)
+    command.add_argument('--confirm', action='store_true')
     command = commands.add_parser("resolve", help="Record operator-confirmed absence locally; never query or resend")
     command.add_argument("action_id")
     command.add_argument("--absent", action="store_true", required=True)
@@ -502,12 +559,14 @@ def main(argv=None):
                         result = resolve(store, args.action_id, absent=args.absent, reason=args.reason, confirm=args.confirm)
                     elif args.command == "update-card":
                         result = update_card(store, conf["publisher"], args.action_id, args.request_id, args.card_file, confirm=args.confirm)
+                    elif args.command == 'resolve-update':
+                        result = resolve_update(store, conf['publisher'], args.action_id, args.reason, confirm=args.confirm)
                     else:
                         result = inspect(store, conf["publisher"], args.action_id)
                 finally:
                     store.close()
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
-        return 3 if result["status"] in {"outcome_unknown", "verification_pending"} else 2 if result["status"] == "failed" else 0
+        return 3 if result["status"] in {"outcome_unknown", "verification_pending", "needs_user"} else 2 if result["status"] == "failed" else 0
     except (MessageError, Busy) as exc:
         result, code = {"status": "failed", "error": str(exc)}, 2
     except (APIError, AmbiguousError, ValueError, OSError, sqlite3.Error):

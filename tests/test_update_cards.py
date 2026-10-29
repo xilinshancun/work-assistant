@@ -187,6 +187,56 @@ class UpdateCardTests(unittest.TestCase):
             messages.resolve(self.store, result["action_id"], absent=True, reason="update absent", confirm=True)
         self.assertFalse(any(c[0] == "PATCH" for c in self.calls[before:]))
 
+    def test_explicit_not_applied_resolution_restores_parent_with_audit_but_never_repatches(self):
+        self.prepare()
+        self.after_effect, self.failure = False, AmbiguousError('lost request')
+        result = self.update()
+        before = len(self.calls)
+        prior = self.store.records()
+        preview = messages.resolve_update(self.store,self.settings,result['action_id'],'Operator checked readable old content.',transport=self.http)
+        self.assertEqual(preview['status'], 'dry_run')
+        self.assertEqual(self.store.records(), prior)
+        resolved = messages.resolve_update(self.store,self.settings,result['action_id'],'Operator confirmed update not applied.',confirm=True,transport=self.http)
+        self.assertEqual(resolved['status'], 'not_applied')
+        self.assertIn('not verified',resolved['resolution']['scope'])
+        parent = self.store.get(self.original['action_id'])['data']
+        self.assertEqual(parent['status'], 'completed')
+        self.assertIsNone(parent['superseded_by'])
+        self.assertEqual(len(self.store.records('message_update_resolution')),1)
+        self.assertEqual(self.update()['status'], 'not_applied')
+        self.assertFalse(any(c[0]=='PATCH' for c in self.calls[before:]))
+        self.failure = None; self.after_effect = True
+        self.assertEqual(self.update(request='separate-explicit-update')['status'],'completed')
+
+    def test_not_applied_resolution_rejects_new_projection_wrong_identity_and_empty_reason(self):
+        self.prepare(); self.failure=AmbiguousError('lost reply')
+        result=self.update()
+        for reason in ('', ' \t'):
+            with self.assertRaises(messages.MessageError):
+                messages.resolve_update(self.store,self.settings,result['action_id'],reason,confirm=True,transport=self.http)
+        with self.assertRaisesRegex(messages.MessageError,'new projection matches'):
+            messages.resolve_update(self.store,self.settings,result['action_id'],'Operator checked.',confirm=True,transport=self.http)
+        self.get_changes={'chat_id':'oc_wrong'}
+        with self.assertRaises(messages.MessageError):
+            messages.resolve_update(self.store,self.settings,result['action_id'],'Operator checked.',confirm=True,transport=self.http)
+        self.assertEqual(self.store.records('message_update_resolution'),[])
+        self.assertEqual(self.store.get(self.original['action_id'])['data']['status'],'superseded')
+
+    def test_url_style_only_unknown_remains_needs_user_and_never_restores_from_projection(self):
+        self.prepare()
+        self.changed=copy.deepcopy(CARD)
+        self.changed['elements'][3]['actions'][0]['url']='https://example.com/different-url'
+        self.card_file.write_text(dumps(self.changed))
+        self.failure=AmbiguousError('lost reply')
+        result=self.update()
+        before=len(self.calls)
+        inspected=messages.inspect(self.store,self.settings,result['action_id'],transport=self.http)
+        self.assertEqual(inspected['status'],'needs_user')
+        with self.assertRaisesRegex(messages.MessageError,'indistinguishable projections'):
+            messages.resolve_update(self.store,self.settings,result['action_id'],'Operator checked old readable content.',confirm=True,transport=self.http)
+        self.assertEqual(self.store.get(self.original['action_id'])['data']['status'],'superseded')
+        self.assertFalse(any(c[0]=='PATCH' for c in self.calls[before:]))
+
     def test_update_lock_and_cli_binding_and_operation_collision(self):
         self.prepare()
         resource = "message-remote:" + digest(["cli_fixture", "om_fixture"])
