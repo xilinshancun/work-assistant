@@ -149,6 +149,24 @@ def make_client(settings, transport=http, base=BASE, process=None):
     return Feishu(settings, transport, base)
 
 
+def document_card(card, document_id):
+    card = json.loads(dumps(card))
+    url = "https://www.feishu.cn/docx/" + urllib.parse.quote(document_id, safe="")
+    def has_button(node):
+        if type(node) is dict:
+            if node.get("tag") == "button" and (node.get("url") == url or
+                    (type(node.get("multi_url")) is dict and node["multi_url"].get("url") == url)):
+                return True
+            return any(has_button(value) for value in node.values())
+        return type(node) is list and any(has_button(value) for value in node)
+    if not has_button(card):
+        button = {"tag": "action", "actions": [{"tag": "button", "type": "default",
+            "text": {"tag": "plain_text", "content": "打开 Daily Sync"}, "url": url}]}
+        index = len(card["elements"]) - (card["elements"][-1].get("tag") == "note")
+        card["elements"].insert(index, button)
+    return card
+
+
 def publish(store, settings, report_id, confirm=False, transport=http, base=BASE, retry=False, process=None):
     payload = preview(store, report_id)
     report_hash = payload["hash"]
@@ -177,6 +195,10 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
             raise ValueError("previous attempt requires explicit --retry after inspection")
         if prior and data["mode"] == "webhook" and data.get("hash") != payload["hash"] and data.get("status") == "completed":
             raise ValueError("webhook cannot update prior cards; use app mode for period updates")
+        document_hash = digest(payload["document"])
+        prior_document_hash = data.get("document_payload_hash")
+        if not prior_document_hash and data.get("status") == "completed" and data.get("report_id"):
+            prior_document_hash = digest(preview(store, data["report_id"])["document"])
         data.update(status="publishing", hash=payload["hash"], report_hash=report_hash, report_id=report_id, pending=None)
         data.pop("error", None)
         data.pop("authentication_incomplete", None)
@@ -233,7 +255,8 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
                                     document_member_verification="api_acknowledged")
                         checkpoint()
                 children = payload["document"]["children"]
-                for index, block in enumerate(children):
+                update_document = prior_document_hash != document_hash
+                for index, block in enumerate(children if update_document else []):
                     if index < len(data["block_ids"]):
                         block_id = urllib.parse.quote(data["block_ids"][index], safe="")
                         effect("update_block:%s" % index, "PATCH", "/docx/v1/documents/%s/blocks/%s" % (doc, block_id),
@@ -246,17 +269,14 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
                             raise AmbiguousError("created block response missing ID")
                         data["block_ids"] = data["block_ids"] + [created[0]["block_id"]]
                     checkpoint()
-                if len(data["block_ids"]) > len(children):
+                if update_document and len(data["block_ids"]) > len(children):
                     effect("delete_obsolete_blocks", "DELETE", "/docx/v1/documents/%s/blocks/%s/children/batch_delete" % (doc, doc),
                            {"start_index": len(children), "end_index": len(data["block_ids"])})
                     data["block_ids"] = data["block_ids"][:len(children)]
                     checkpoint()
-                card = json.loads(dumps(payload["card"]))
-                # Official lark-cli BuildResourceURL uses this standard Feishu
-                # origin, which redirects to the resource's tenant domain.
-                card["elements"].append({"tag": "action", "actions": [{"tag": "button", "type": "primary",
-                    "text": {"tag": "plain_text", "content": "打开 Daily Sync"},
-                    "url": "https://www.feishu.cn/docx/" + doc}]})
+                data.update(document_payload_hash=document_hash, document_report_id=report_id)
+                checkpoint()
+                card = document_card(payload["card"], data["document_id"])
                 if data["message_id"]:
                     effect("update_card", "PATCH", "/im/v1/messages/" + urllib.parse.quote(data["message_id"], safe=""),
                            {"content": dumps(card)})
