@@ -8,7 +8,7 @@ Claude 写工具仅 Read/Glob/Grep/Edit/Write，不开放 Bash。可写项目的
 
 `protocol_status` 与 `goal_status` 分开：协议完成本身不能证明用户目标实现，未审查结果的目标状态始终是 unverified。只清理非 UTF-8 的无关 `PASEO_*` 元数据并记下键名，不记录坏值；其他损坏的用户环境在启动前报错，凭证与授权不自动替换。DSH 仅过滤已核实的模型列表诊断格式，不能把任意损坏协议行当作日志跳过。
 
-Codex 的文件沙箱不约束 MCP 的外部效果。每次调用前必须以相同配置/环境/cwd 成功列出 MCP，按名字逐项追加带引号的 `enabled=false` 覆盖，不使用不能清空合并配置的 `mcp_servers={}`。列表不支持、失败、超时或格式异常都阻止启动；服务器 transport、env、auth 不进入日志。配置受信任，运行期间不应并发修改提供商注册。所有 Codex 调用还逐次关闭 apps、web_search 和 workspace-write 网络；模型服务连接与登录保留，不改全局配置。V1 不提供外部连接器权限扩展或调用。
+Codex 的文件沙箱不约束 MCP 的外部效果。每次调用前必须以相同配置/环境/cwd 成功列出 MCP，仅接受 `[A-Za-z0-9_-]+` 名称，按无引号路径覆盖完整 table `{command="wa-mcp-disabled",enabled=false}`。不使用不能清空合并配置的 `mcp_servers={}`，也不使用会被 CLI 原样切分的引号 key 或缺少 transport 的部分 table。带覆盖参数再次 list，必须名称集合完全一致且全部 disabled；doctor 复用同一流程。列表不支持、失败、超时、格式异常或复核失败都阻止模型启动，标明 `launched=false`；服务器 transport、env、auth 不进入日志。配置受信任，运行期间不应并发修改提供商注册。所有 Codex 调用还逐次关闭 apps、web_search 和 workspace-write 网络；模型服务连接与登录保留，不改全局配置。V1 不提供外部连接器权限扩展或调用。
 
 进程启动之前写运行记录，task 和写 workspace 有 SQLite 持久排他记录与 POSIX flock。子进程继承锁句柄，因此父进程崩溃后仍活着的 worker 不会被安全地“过期重试”。没有自动过期重放；核对时必须取得 OS 锁。超时、截断、信号终止或收集失败记录 unknown；未知任务禁止再 route/run。明确的人工作业结果处理有理由和审计事件，不能伪装成独立验证。跟进是新运行记录，并显式复用原 session。
 

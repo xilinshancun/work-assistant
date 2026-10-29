@@ -2,6 +2,7 @@
 import json
 import re
 import tempfile
+import time
 from pathlib import Path
 from .policy import execution_policy
 from .process import execute, ProcessLaunchError
@@ -46,40 +47,54 @@ def codex_local_argv(argv):
 
 
 def codex_mcp_preflight(argv, env, cwd, process=execute, timeout=10, pass_fds=()):
-    """Read names/enable flags only; never persist MCP transport/env/auth data."""
-    try:
-        result = process(codex_local_argv(argv) + ["mcp", "list", "--json"], "", cwd=cwd, env=env,
-                         timeout=min(timeout, 10), pass_fds=pass_fds, max_bytes=128 * 1024)
-    except OSError:
-        raise MCPPreflightError("Codex MCP preflight could not start; model execution blocked")
-    if result.returncode != 0 or result.timed_out or result.truncated:
-        raise MCPPreflightError("Codex MCP preflight failed/timed out; CLI must support mcp list --json; model execution blocked")
-    try:
-        servers = strict_json(result.stdout)
-    except (ValueError, TypeError, RecursionError, OverflowError):
-        raise MCPPreflightError("Codex MCP preflight returned invalid JSON; model execution blocked")
-    if type(servers) is not list or len(servers) > 512:
-        raise MCPPreflightError("Codex MCP preflight requires a bounded server array; model execution blocked")
-    names, disabled = set(), []
-    for server in servers:
-        if type(server) is not dict or type(server.get("name")) is not str or type(server.get("enabled")) is not bool:
-            raise MCPPreflightError("Codex MCP preflight returned malformed server metadata; model execution blocked")
-        name = server["name"]
-        if not name or len(name) > 512 or name in names or any(ord(c) < 32 or ord(c) == 127 for c in name):
-            raise MCPPreflightError("Codex MCP preflight returned an invalid/duplicate name; model execution blocked")
+    """Inspect, override complete server tables, then verify without starting MCP."""
+    deadline = time.monotonic() + min(timeout, 10)
+    latency_ms, diagnostics = 0, []
+
+    def inspect(overrides):
+        nonlocal latency_ms
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MCPPreflightError("Codex MCP preflight timed out; model execution blocked")
         try:
-            name.encode("utf-8", "strict")
-        except UnicodeError:
-            raise MCPPreflightError("Codex MCP preflight returned a non-UTF8 name; model execution blocked")
-        names.add(name)
-        if server["enabled"]:
-            disabled.append(name)
+            result = process(codex_local_argv(argv) + overrides + ["mcp", "list", "--json"], "",
+                             cwd=cwd, env=env, timeout=remaining, pass_fds=pass_fds, max_bytes=128 * 1024)
+        except OSError:
+            raise MCPPreflightError("Codex MCP preflight could not start; model execution blocked")
+        if result.returncode != 0 or result.timed_out or result.truncated:
+            raise MCPPreflightError("Codex MCP preflight failed/timed out; CLI must support mcp list --json; model execution blocked")
+        try:
+            servers = strict_json(result.stdout)
+        except (ValueError, TypeError, RecursionError, OverflowError):
+            raise MCPPreflightError("Codex MCP preflight returned invalid JSON; model execution blocked")
+        if type(servers) is not list or len(servers) > 512:
+            raise MCPPreflightError("Codex MCP preflight requires a bounded server array; model execution blocked")
+        names = {}
+        for server in servers:
+            if type(server) is not dict or type(server.get("name")) is not str or type(server.get("enabled")) is not bool:
+                raise MCPPreflightError("Codex MCP preflight returned malformed server metadata; model execution blocked")
+            name = server["name"]
+            # Installed Codex splits CLI override keys literally on dots. Quoting
+            # does not escape a path component; only this ASCII subset is safe.
+            if len(name) > 512 or re.fullmatch(r"[A-Za-z0-9_-]+", name) is None or name in names:
+                raise MCPPreflightError("Codex MCP preflight requires unique names matching [A-Za-z0-9_-]+; model execution blocked")
+            names[name] = server["enabled"]
+        latency_ms += result.latency_ms
+        diagnostics.extend(result.diagnostics)
+        return names
+
+    initial = inspect([])
+    disabled = [name for name, enabled in initial.items() if enabled]
     overrides = []
     for name in sorted(disabled):
-        # JSON basic-string escaping is also valid TOML here (controls rejected).
-        overrides += ["-c", "mcp_servers.%s.enabled=false" % json.dumps(name, ensure_ascii=False)]
-    return overrides, {"disabled_count": len(disabled), "server_count": len(names),
-                       "latency_ms": result.latency_ms, "diagnostics": list(result.diagnostics)}
+        # A partial enabled=false table is rejected by Codex's override-layer
+        # transport validation. Replace the entire server with a disabled stub.
+        overrides += ["-c", 'mcp_servers.%s={command="wa-mcp-disabled",enabled=false}' % name]
+    verified = inspect(overrides)
+    if set(verified) != set(initial) or any(verified.values()):
+        raise MCPPreflightError("Codex MCP isolation verification failed: server set changed or a server remains enabled; model execution blocked")
+    return overrides, {"disabled_count": len(disabled), "server_count": len(initial), "verified": True,
+                       "latency_ms": latency_ms, "diagnostics": diagnostics}
 
 
 def parse(provider, result, action="read"):

@@ -109,7 +109,9 @@ python3 -m work_assistant task add writable-project '在工作区添加合成示
 
 进程环境保留用户配置与凭证。若继承的 `PASEO_*` 元数据含非 UTF-8 值，会移除这一无效元数据键并记录 diagnostics，避免 Rust CLI 在枚举环境时 panic；其他无效用户环境会在启动前明确报错，不静默改变授权或凭证。
 
-所有 Codex 调用（分类、执行、跟进）都先以相同 argv 基础配置、环境和 cwd 运行有界的 `mcp list --json`。仅读取名字与 enabled 标志，逐个用带引号的 TOML key 禁用已启用的 MCP，不保存列表里的 transport/env/auth。无此命令、超时、截断或畸形输出都会阻止 exec；`doctor` 的 `mcp_isolation_ready=false` 会明确指出不能安全启动，不降级绕过。预检最多 10 秒、每路输出 128 KiB、512 个服务器；已禁用的服务器不额外覆盖。
+所有 Codex 调用（分类、执行、跟进）都先以相同 argv 基础配置、环境和 cwd 运行有界的 `mcp list --json`。仅接受 `[A-Za-z0-9_-]+` 名称，使用无引号路径和完整 inline table（如 `mcp_servers.name={command="wa-mcp-disabled",enabled=false}`）替换已启用服务器，再带覆盖参数执行一次 list：名称集合必须一致且全部 disabled。doctor 也走相同的复核路径。无此命令、超时、截断、畸形输出、不合规名字或复核失败都阻止 exec，且 `launched=false`；不降级绕过。预检两次合计最多 10 秒、每路输出 128 KiB、512 个服务器；不保存列表里的 transport/env/auth，不改全局配置。检测到本机 Codex 时，离线测试会用隔离的合成配置运行真实 list 验证覆盖语法，不调用模型或 MCP 工具。
+
+安装版 0.164 对已有 HTTP URL server 应用上述 stdio 占位 table 时会拒绝加载 transport；这类配置会在复核阶段被明确阻止，不能声称已成功隔离后继续执行。需要用户另行处理自己配置中的该 server，本工具不会修改全局配置或尝试绕过。
 
 每次 Codex 调用同时覆盖 `features.apps=false`、`web_search="disabled"`、`sandbox_workspace_write.network_access=false`，不修改全局配置，保留模型自身连接和订阅认证。V1 暂不提供外部连接器调用，真实业务研究需要用户后续明确扩展权限；read/write grant 不隐含外部应用写入。配置键参考 [官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
