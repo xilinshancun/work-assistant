@@ -6,9 +6,9 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
-from work_assistant.feishu import http, publish, preview, reconcile, APIError, AmbiguousError, Feishu
+from work_assistant.feishu import http, publish, preview, reconcile, APIError, AmbiguousError, Feishu, document_card
 from work_assistant.reports import generate_report
-from work_assistant.util import dumps
+from work_assistant.util import dumps, digest
 from test_runtime import Base
 
 
@@ -87,6 +87,67 @@ class FeishuTests(Base):
 
     def send(self, **kwargs):
         return publish(self.s, self.settings, self.report["id"], confirm=True, base=self.server.base, **kwargs)
+
+    def revise_card(self, card):
+        original = self.report
+        path = self.root / ("card-revision-" + str(len(self.s.records("report"))))
+        path.mkdir()
+        content = {name: (Path(original["data"]["path"]) / name).read_text() for name in original["data"]["files"]}
+        content["card.json"] = dumps(card)
+        for name, text in content.items():
+            (path / name).write_text(text)
+        data = dict(original["data"], path=str(path), hash=digest(content),
+                    files={name: digest(text.encode()) for name, text in content.items()})
+        self.report = self.s.record("report", data, project_id=self.p["id"])
+
+    def test_card_only_update_does_not_write_document_and_is_noop_afterwards(self):
+        first = self.send()
+        data = self.s.get(first["publication_id"])["data"]
+        data.pop("document_payload_hash")
+        data.pop("document_report_id")  # Compatibility with the prior released journal.
+        self.s.update_record(first["publication_id"], data)
+        card = preview(self.s, self.report["id"])["card"]
+        card["header"]["title"]["content"] = "Synthetic approved card revision"
+        self.revise_card(card)
+        before = len(self.server.calls)
+        second = self.send()
+        writes = [(m, p) for m, p, _ in self.server.calls[before:] if m != "GET" and "/tenant_access_token/" not in p]
+        self.assertEqual(writes, [("PATCH", "/im/v1/messages/message-synthetic")])
+        self.assertEqual(second["document_id"], first["document_id"])
+        self.assertEqual(second["block_ids"], first["block_ids"])
+        self.assertEqual(second["document_report_id"], self.report["id"])
+        count = len(self.server.calls)
+        self.assertTrue(self.send()["no_op"])
+        self.assertEqual(len(self.server.calls), count)
+
+    def test_card_only_timeout_preserves_document_ack_and_unknown(self):
+        first = self.send()
+        card = preview(self.s, self.report["id"])["card"]
+        card["elements"].append({"tag": "note", "elements": [{"tag": "plain_text", "content": "Synthetic note"}]})
+        self.revise_card(card)
+        def timeout(method, url, body, headers):
+            if "/im/v1/messages/" in url:
+                raise AmbiguousError("synthetic ambiguous card update")
+            self.assertNotIn("/docx/", url)
+            return http(method, url, body, headers)
+        unknown = self.send(transport=timeout)
+        self.assertEqual(unknown["status"], "outcome_unknown")
+        self.assertEqual(unknown["pending"]["stage"], "update_card")
+        self.assertEqual(unknown["document_payload_hash"], first["document_payload_hash"])
+        with self.assertRaises(ValueError):
+            self.send(retry=True)
+
+    def test_native_button_reused_or_default_inserted_before_final_note(self):
+        url = "https://www.feishu.cn/docx/doc-synthetic"
+        native = {"tag": "button", "type": "default", "text": {"tag": "plain_text", "content": "Approved"}, "url": url}
+        card = {"elements": [{"tag": "action", "actions": [native]}, {"tag": "note", "elements": []}]}
+        self.assertEqual(document_card(card, "doc-synthetic"), card)
+        card["elements"][0]["actions"][0]["url"] = "https://www.feishu.cn/docx/different"
+        updated = document_card(card, "doc-synthetic")
+        self.assertEqual(updated["elements"][-1]["tag"], "note")
+        self.assertEqual(updated["elements"][-2]["actions"][0]["type"], "default")
+        self.assertEqual(updated["elements"][-2]["actions"][0]["url"], url)
+        self.assertEqual(len(card["elements"]), 2)
 
     def test_preview_requires_no_credentials_or_requests(self):
         with patch.dict(os.environ, {}, clear=True):
