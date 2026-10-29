@@ -277,6 +277,14 @@ python3 -m work_assistant publish REPORT_ID --confirm --retry
 
 若人工确认授权未生效，可改用 `--remote-ids '{"document_member_granted":false}'`，仅配合 `retry_authorized` 和非空理由，保持原成员、权限、目的地及已知文档 ID；这会记录 `operator_confirmed_absent` 而非已授权，之后仍须显式 `publish --confirm --retry` 才重发一次授权，不能以 `completed` 或 `cancelled` 绕过。
 
+## 多会话发送普通消息
+
+多个会话可以直接使用同一份配置和 journal，通过 `python3 -m work_assistant.messages` 发送已获授权的定稿文字，无需依赖某个长期在线的主控会话。`chats` 查询机器人可访问的群，`send` 默认 dry-run，`inspect` 只读核对已知消息；完整用法见 [消息命令](docs/messages.md)。
+
+每次逻辑请求使用稳定的 request-id，接力时沿用原 ID、目标和正文。发送回执与读回核验分别记录；结果未知时不换 ID 补发。操作者核实未投递后，可以用显式 `resolve --absent` 记录本地决议，后续新发送仍需用户授权。共享 Skill 负责识别用户意图与目标，命令负责持久化、互斥和回执；本项目不提供飞书入站聊天服务。
+
+日报继续使用文档与摘要卡片的发布流程，不由普通文字命令代替。带两色高亮块的内部数据契约见 [原生高亮块](docs/daily-callouts.md)。
+
 ## Paseo 集成与验证范围
 
 不新增 scheduler/daemon，不修改现有 schedules。把已有 Paseo schedule/agent 的工作目录设为本仓库，运行上述一次性 CLI 即可。例如已有每日流程运行 `python3 -m work_assistant report my-project --date YYYY-MM-DD`，读取报告后以 dry-run 检查；若未配置精确发布 grant，则留待用户显式 publish。给调度 agent 的约束示例：“只运行指定项目 report 命令，回传 report ID/路径；发现 unknown 就回报，不自动 resume/retry，不发外部消息。”写任务由用户先建好并授权，调度 agent 只操作明确给出的 task ID。
