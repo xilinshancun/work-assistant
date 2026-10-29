@@ -1,12 +1,13 @@
 """Import an explicitly selected, validated daily bundle. No providers or network."""
 import html
+import ipaddress
 import os
 import re
 import stat
 from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .reports import STYLE, save_report
@@ -66,6 +67,40 @@ def escape(value):
     return html.escape(str(value), quote=True)
 
 
+def http_link(href):
+    if not re.match(r"(?i)^https?://", href):
+        return None
+    _text(href, "HTTP link", 8192)
+    try:
+        target = urlsplit(href)
+        if not target.hostname or target.username is not None or target.password is not None:
+            raise ValueError()
+        if target.netloc.startswith("[") and ":" not in target.hostname:
+            raise ValueError()  # Python 3.9 does not validate bracket contents itself.
+        target.port  # Validate malformed/out-of-range ports without connecting.
+        hostname = unquote(target.hostname).encode("idna").decode("ascii").lower().rstrip(".")
+    except (ValueError, UnicodeError):
+        raise ValueError("HTTP link must be absolute with a valid port and no credentials") from None
+    if any(c.isspace() or ord(c) < 32 for c in href):
+        raise ValueError("HTTP link contains unsupported whitespace/control characters")
+    if "%" in hostname:  # Scoped IPv6 or an ambiguously encoded host is machine-local context.
+        return None
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        if ("." not in hostname or hostname.endswith((".localhost", ".local", ".internal"))
+                or not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*", hostname)
+                or re.fullmatch(r"(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*", hostname)):
+            return None
+    else:
+        address = getattr(address, "ipv4_mapped", None) or address
+        if not address.is_global or address.is_multicast:
+            return None
+    export_data(href)  # Check the original URL, including query/fragment, before encoding.
+    # Official Docx Link.url requires the entire URL to be URL-encoded.
+    return {"url": quote(href, safe="")}
+
+
 def md_text(value):
     return re.sub(r"([\\`*_{}\[\]()<>#!|])", r"\\\1", str(value))
 
@@ -108,6 +143,8 @@ def element_html(elements):
                          ("underline", "u"), ("inline_code", "code")):
             if style.get(key):
                 part = "<%s>%s</%s>" % (tag, part, tag)
+        if style.get("link"):
+            part = '<a href="' + escape(unquote(style["link"]["url"])) + '">' + part + "</a>"
         result.append(part)
     return "".join(result)
 
@@ -259,6 +296,8 @@ class VisibleReport(HTMLParser):
         first_title = tag == "h1" and not hidden and self._active() and not self.title_seen
         self.title_seen = self.title_seen or first_title
         node = {"tag": tag, "hidden": bool(hidden), "summary": summary, "title": first_title, "children": []}
+        if tag == "a":
+            node["href"] = attrs.get("href", "").strip()
         (self.stack[-1][4]["children"] if self.stack else self.tree).append(node)
         self.stack.append((tag, bool(hidden), summary, first_title, node))
         if summary and self._active():
@@ -321,7 +360,9 @@ class VisibleReport(HTMLParser):
             raise ValueError("source report requires exactly one visible sync-summary")
         return title, summary, body
 
-    def semantic_blocks(self):
+    def semantic_blocks(self, body_scope="strict"):
+        if type(body_scope) is not str or body_scope not in {"strict", "main"}:
+            raise ValueError("body_scope must be strict or main")
         mains = []
         def find(nodes):
             for node in nodes:
@@ -332,8 +373,6 @@ class VisibleReport(HTMLParser):
         find(self.tree)
         if len(mains) != 1:
             raise ValueError("source requires exactly one visible main for native delivery")
-        def has_title(node):
-            return node.get("title") or any(has_title(c) for c in node["children"] if type(c) is dict)
         def check_outside(nodes, parent=""):
             for node in nodes:
                 if type(node) is str:
@@ -342,10 +381,9 @@ class VisibleReport(HTMLParser):
                     continue
                 if node["hidden"] or node is mains[0] or node["title"]:
                     continue
-                if parent == "body" and node["tag"] == "header" and has_title(node):
-                    continue
                 check_outside(node["children"], node["tag"])
-        check_outside(self.tree)
+        if body_scope == "strict":
+            check_outside(self.tree)
         result, summary_parts, summary_elements = [], [], []
         inline_tags = {"strong", "b", "em", "i", "span", "a", "code", "s", "small", "u", "br", "wbr",
                        "mark", "time", "abbr", "kbd", "del", "ins", "label", "var", "samp", "cite", "dfn", "bdi", "bdo"}
@@ -374,6 +412,10 @@ class VisibleReport(HTMLParser):
                 style["underline"] = True
             if tag in {"code", "kbd", "samp"}:
                 style["inline_code"] = True
+            if tag == "a":
+                link = http_link(node.get("href", ""))
+                if link:
+                    style["link"] = link
             if tag == "br":
                 return [("\n", style)]
             runs, previous_block = [], False
@@ -592,7 +634,9 @@ def render_import(snapshot):
                                       + " href='index.html'>打开 Daily Sync</a><p class='meta'>" + escape(signature) + "</p></section>")}
 
 
-def import_daily(store, project, source_root, period, timezone_name="Asia/Shanghai", title=None):
+def import_daily(store, project, source_root, period, timezone_name="Asia/Shanghai", title=None, body_scope="strict"):
+    if type(body_scope) is not str or body_scope not in {"strict", "main"}:
+        raise ValueError("body_scope must be strict or main")
     if title is not None:
         title = _text(title, "display title", 200).strip()
     try:
@@ -641,8 +685,8 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
             raise ValueError("source validation report_sha256 mismatch")
         parsed = VisibleReport()
         source_title, summary, body = parsed.extract(report_raw)
-        native_blocks, summary_paragraphs, summary_elements = parsed.semantic_blocks()
         coverage = {"covered_from": evidence["covered_from"], "covered_until": evidence["covered_until"]}
+        native_blocks, summary_paragraphs, summary_elements = parsed.semantic_blocks(body_scope)
         selected = _evidence_summary(evidence)
         snapshot = export_data({"schema": "wa.report.v1", "origin": "external_daily_import",
             "project": p["name"], "project_id": p["id"], "date": period, "timezone": timezone_name,
@@ -651,6 +695,7 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
             "source_title": source_title, "summary": summary, "body": body,
             "native_blocks": native_blocks, "summary_paragraphs": summary_paragraphs,
             "summary_elements": summary_elements,
+            "import_options": {"body_scope": body_scope},
             "scope": SCOPE, "tasks": [], "claims": [], "corrections": [], "evidence": selected})
         content = render_import(snapshot)
         # Re-read every input, including state, after extraction/rendering. Changed bytes,
@@ -665,4 +710,5 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
             # Extra source metadata remains in the private journal, outside all outbound files.
             return save_report(store, p, period, content, metadata={"origin": "external_daily_import",
                 "source_hashes": snapshot["source_hashes"], "coverage": coverage, "timezone": timezone_name,
+                "import_options": snapshot["import_options"],
                 "source_root": str(root), "source_state": state, "source_evidence": evidence})

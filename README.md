@@ -135,7 +135,7 @@ python3 -m work_assistant publish REPORT_ID --dry-run
 ```sh
 python3 -m work_assistant init
 python3 -m work_assistant project add imported-demo --workspace .
-python3 -m work_assistant import-daily imported-demo --source-root examples/daily-bundle --date 2026-01-15 --timezone Asia/Shanghai
+python3 -m work_assistant import-daily imported-demo --source-root examples/daily-bundle --date 2026-01-15 --timezone Asia/Shanghai --body-scope main
 python3 -m work_assistant publish REPORT_ID --dry-run
 ```
 
@@ -145,7 +145,11 @@ python3 -m work_assistant publish REPORT_ID --dry-run
 
 bundle 根目录的 `state.json` 提供 `timezone` 以及 `daily.last_report`、`daily.last_evidence`、`daily.last_successful_execution_date`、`daily.covered_until`。两个文件路径在解析符号链接后必须仍位于 bundle 内。evidence 要求 `report_type=daily`，其 `execution_date` 或 `report_date` 至少提供一个，所有已提供的日期、state 的成功执行日期与 `--date` 必须一致；别名同时存在时不允许冲突，不会向源补写字段；两处 timezone 与命令一致；覆盖区间起点早于终点，state/evidence 的终点字符串一致，终点转换到所选时区后的日期必须等于请求日期，不允许未来的终点或执行日期。区间时间戳须有时区偏移，可使用 UTC `Z`。必须提供 `validation.status=passed`，并让 `validation.report_sha256` 等于源 HTML **原始字节**的 SHA-256。缺失、过期、未通过校验、哈希不符或读取期间发生变化均明确报错，不能退回旧日报。
 
-HTML 使用 body 中首个可见 h1 提供默认展示标题，并要求唯一的 `id="sync-summary"` 和唯一的可见 `main`。外部文档只从 main 提取正文：正式标题仅放 document 元数据，去掉 body 顶层包含该标题的 header 和首个标题 h1；main 内的 article／header／footer 正文和后续 h1 必须保留。main 外存在其他可见业务文字时明确拒绝，要求把业务正文放入 main，不会静默丢弃。正文先生成一行自然中文覆盖区间，例如“10月28日 17:30—10月29日 17:30 · 北京时间”；其他时区显示 zone 名，跨年区间保留年，完整秒精度仍保存在元数据。h1…h6 → 原生 heading1…heading6（block_type 3…8）、普通 p → text（2）、li 和摘要内的 p → bullet（12）；details 的 summary → heading2，折叠正文保留。strong／b、em／i、s／del 分别写入原生 text_run.text_element_style.bold／italic／strikethrough；删除线也保留在本地预览、Markdown 和卡片中，避免把划掉的结论变成事实。mark、time、abbr、kbd、ins、label 等受支持的标准内联元素保持同一段／列表项，kbd／code 记为 inline_code，ins／u 记为 underline。sup／sub／q 等暂不能可靠表示的语义以及未知可见元素明确拒绝，不扁平化、不改写。原文限定逐字保留，不调用模型重写。紧凑表格保留单元格／行边界，单元格中的 p／div 等子块用分隔符区分，避免 10 和 20 拼成 1020；pre 保留行结构；支持可选闭标签，歧义嵌套明确拒绝。原始可见 body 和 summary 另存本地证据快照，便于对照。
+HTML 使用 body 中首个可见 h1 提供默认展示标题，并要求唯一的 `id="sync-summary"` 和唯一的可见 `main`。外部文档只从 main 提取正文：正式标题仅放 document 元数据；main 内的 article／header／footer 正文和后续 h1 保留。默认 `--body-scope strict` 仅排除首个标题 h1 与显式 nav 等已排除元素，main 外的其他可见文字（包括 header 中的采集不完整限定、覆盖说明或 footer 说明）一律明确拒绝，绝不整段猜测并删除 header／footer。对于已由用户逐字核验、确认 main 包含完整业务内容的固定模板，可显式选择 `--body-scope main`：仅导出 main，忽略外层 header／footer；选择写入快照和私有记录的 `import_options.body_scope`，参与哈希，原始可见 body 仍留在本地证据中供核查。它不会修改源，也不赋予任何发布权限。正文先生成一行自然中文覆盖区间，例如“10月28日 17:30—10月29日 17:30 · 北京时间”；其他时区显示 zone 名，跨年区间保留年，完整秒精度仍保存在元数据。h1…h6 → 原生 heading1…heading6（block_type 3…8）、普通 p → text（2）、li 和摘要内的 p → bullet（12）；details 的 summary → heading2，折叠正文保留。strong／b、em／i、s／del 分别写入原生 text_run.text_element_style.bold／italic／strikethrough；删除线也保留在本地预览、Markdown 和卡片中，避免把划掉的结论变成事实。mark、time、abbr、kbd、ins、label 等受支持的标准内联元素保持同一段／列表项，kbd／code 记为 inline_code，ins／u 记为 underline。sup／sub／q 等暂不能可靠表示的语义以及未知可见元素明确拒绝，不扁平化、不改写。原文限定逐字保留，不调用模型重写。紧凑表格保留单元格／行边界，单元格中的 p／div 等子块用分隔符区分，避免 10 和 20 拼成 1020；pre 保留行结构；支持可选闭标签，歧义嵌套明确拒绝。原始可见 body 和 summary 另存本地证据快照，便于对照。
+
+固定模板的一次性调用／wrapper 配置方法：在现有 `import-daily PROJECT --source-root ROOT --date YYYY-MM-DD` 参数后追加 `--body-scope main`；未明确核验 main 的未知模板继续使用默认 strict。此前已生成的不可变快照不改写；scope 变化会产生新的报告哈希。
+
+正文 a 标签仅对安全的绝对 HTTP(S) 目标生成原生 `text_run.text_element_style.link.url`（按官方 schema 对完整 URL 编码），支持与 bold／italic 等组合。本地预览也可点击这些链接；相对／本地导航和 javascript 等目标仅保留标签文字，不生成外链。链接目标也只保留标签、不输出地址的情况包括 localhost／*.localhost、.local／.internal、单标签主机，以及由 ipaddress 识别的非公网或组播 IP（含 loopback、私网、link-local、IPv4-mapped IPv6）；大小写、尾部点和端口不绕过检查。不做 DNS 查询，普通多标签域名是否在使用者内网中无法据此判断，不会猜测。原始 href 先通过凭证／本地路径检查，含敏感 query／fragment、userinfo 或非法控制字符的 HTTP 链接拒绝且诊断不回显 URL；每条 HTTP 链接最多 8192 字符。
 
 卡片保留蓝标题，从摘要首个内容段取 lead（跳过 Sync 精简版等标题），安全转义后用 lark_md 加粗；hr 后的其余原段落各占独立 bullet div（默认 plain_text；有删除线时使用安全转义的 lark_md 保留删除语义），底部灰色 note 显示“工作助理 · 项目名 · 截至 MM-DD HH:MM”。不从无依据数据生成重点、不截断原文。远端文档 ID 在发布时才可知，发布器负责在最终 note 前插入 type=default 的描边文档按钮；本地 card-preview.html 展示对应描边按钮，不伪造远端 URL。index.html 和卡片预览展示真实 heading／bullet／bold／italic 结构，全部文字转义、自包含。内部证据、源路径、JSON 明细和技术校验说明不会追加到远端文档／卡片；本地 evidence.html／json 留作单独核查。
 

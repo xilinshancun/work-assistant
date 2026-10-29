@@ -134,7 +134,7 @@ without API calls. Offline FakeCLI tests are protocol fixtures, not live proof.
 
 ### External daily import contract
 
-`import-daily PROJECT --source-root ROOT --date YYYY-MM-DD [--timezone Asia/Shanghai] [--title TITLE]`
+`import-daily PROJECT --source-root ROOT --date YYYY-MM-DD [--timezone Asia/Shanghai] [--title TITLE] [--body-scope strict|main]`
 imports an explicitly selected, validated local bundle without collecting, scheduling,
 calling models, or publishing. It verifies date/timezone/watermark agreement, aware
 nonfuture coverage with cutoff date matching the requested date in the selected zone, original HTML SHA-256 and validation status; bounded reads stay
@@ -160,9 +160,12 @@ without active markup/navigation. Table cell/row boundaries and preformatted lin
 preserved; optional paragraph/list/table end tags are handled, and ambiguous nesting
 is rejected. Only the first visible h1 supplies the title. Seven escaped standard outputs and an ordinary
 immutable report record reuse the existing publisher identity/checkpoints. External documents put their single title in metadata, then one readable coverage
-line and native main content. Only the body-level title header and first title h1
-are removed; main article/header/footer and later h1 remain. Visible business content
-outside main is rejected instead of dropped. h1..h6 map to native heading1..heading6,
+line and native main content. The default strict scope removes only the first title h1 and explicit excluded
+navigation; any other visible outside-main content is rejected, including header
+qualifications and footer text. A trusted explicit --body-scope main selection for a
+verified template exports only main, preserving in-main article/header/footer and later
+h1. The scope is recorded in import_options and hashed; it is never source/model
+authority or a publication grant. Full visible body text remains locally auditable. h1..h6 map to native heading1..heading6,
 li and summary p to bullet, ordinary p to text, details summary to heading2.
 Supported inline tags stay in their paragraph/list item; unsupported semantics
 (including sup/sub/q) are rejected. Cell child blocks retain explicit separators.
@@ -172,7 +175,14 @@ coverage uses 北京时间 for Asia/Shanghai, zone names elsewhere, and years ac
 year boundaries; exact source timestamps stay in metadata. URL query/fragment
 local paths are checked after bounded percent decoding, without changing URL text. Maximum 1000
 blocks including coverage, 10000 characters/1000 runs per block; reject overflow.
-Local previews reproduce the native structure without executing source markup. Internal evidence
+Safe absolute HTTP(S) anchors preserve native link.url with official whole-URL
+encoding and combined inline styles. Relative/local/unsafe schemes retain labels
+only; raw href credentials/local paths are checked before encoding. Localhost/suffix
+local names, single-label hosts and non-global/multicast IP targets retain labels
+only, using hostname/ipaddress checks without DNS. Ordinary dotted hostnames are
+not guessed to be internal. Userinfo and malformed ports remain rejected. Maximum URL
+length is 8192 characters. Local previews retain clickable safe links and reproduce
+the native structure without executing source markup. Internal evidence
 and technical verification notes remain in local evidence.html/json only. Evidence
 summaries are bounded and attributed as reported; import-specific export checks
 reject recognizable credentials/local paths without rewriting ordinary parameter

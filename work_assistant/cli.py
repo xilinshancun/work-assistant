@@ -94,6 +94,8 @@ def parser():
     a.add_argument("--date", required=True)
     a.add_argument("--timezone", default="Asia/Shanghai")
     a.add_argument("--title", help="Override display title (nonempty, max 200 characters)")
+    a.add_argument("--body-scope", choices=["strict", "main"], default="strict",
+                   help="Explicit main-only export for a verified template; default rejects outside content")
     a = commands.add_parser("publish")
     a.add_argument("id")
     modes = a.add_mutually_exclusive_group()
@@ -141,7 +143,8 @@ def dispatch(args, conf, store):
     if c == "report":
         return generate_report(store, args.project, args.date, args.output)
     if c == "import-daily":
-        return import_daily(store, args.project, args.source_root, args.date, args.timezone, title=args.title)
+        return import_daily(store, args.project, args.source_root, args.date, args.timezone, title=args.title,
+                            body_scope=args.body_scope)
     if c == "publish":
         if args.dry_run or (not args.confirm and not conf["publisher"].get("grants")):
             return preview(store, args.id)
