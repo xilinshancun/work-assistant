@@ -169,7 +169,7 @@ dry-run 不需要凭证也不联网。真实自建应用模式需要设置配置
 python3 -m work_assistant publish REPORT_ID --confirm
 ```
 
-每位使用者需要在自己的飞书租户建立自建应用或 Webhook，使用自己有权限的文档空间和目的地；仓库不附带共享应用、租户、机器人或账号。先用自己专用的测试目的地验收。没有配置时明确报错。本开发实现未向真实飞书发送；本地 HTTP server 验证 API 协议和故障状态。应用模式创建/更新 docx 文档块和 interactive 卡片，保存文档、块、消息 ID。相同目的地+项目+周期复用资源；相同内容无请求；变更内容更新已有资源。单个 CLI 对真实 API 节流，服务端应用错误仍立即失败。Webhook 设置 `publisher.mode=webhook` 并配置 `FEISHU_WEBHOOK`，只发送卡片，文档留本地；Webhook 没有消息更新能力，已发布周期的新内容会明确拒绝，需改用应用模式。
+每位使用者需要在自己的飞书租户建立自建应用或 Webhook，使用自己有权限的文档空间和目的地；仓库不附带共享应用、租户、机器人或账号。先用自己专用的测试目的地验收。没有配置时明确报错。开发者已在自有测试私聊验证应用模式的文档创建、本人权限分享、卡片发送、同文档／同卡片更新与重复发布 no-op；离线 HTTP server 另外覆盖故障状态。应用模式创建/更新 docx 文档块和 interactive 卡片，保存文档、块、消息 ID。相同目的地+项目+周期复用资源；相同内容无请求；变更内容更新已有资源。单个 CLI 对真实 API 节流，服务端应用错误仍立即失败。Webhook 设置 `publisher.mode=webhook` 并配置 `FEISHU_WEBHOOK`，只发送卡片，文档留本地；Webhook 没有消息更新能力，已发布周期的新内容会明确拒绝，需改用应用模式。
 
 精确预配置目的地 grant 使用 `app:<sha256([app_id,receive_id_type,receive_id,folder_token])>` 或 `webhook:<sha256(webhook_url)>`，序列化规则为 UTF-8、排序 key、紧凑 JSON，与代码 `util.digest` 一致。grants 默认空；通常使用逐次 `--confirm` 即可，模型输出不能建立 grant。
 
@@ -242,4 +242,4 @@ python3 -m work_assistant publish REPORT_ID --confirm --retry
 
 ## 已验证的实际链路
 
-2026-10-29 在隔离合成 Git 工作区验证了：DSH 简单任务直接路由 → Codex 实际修改指定文件 → Claude Code 独立只读审查 → 本地 Daily Sync 与证据输出；由主控再次核对文件精确内容。另一个复杂任务实际触发一次 DSH → Codex GPT planner 升级并选出 Claude 执行器，该测试只分类，没有执行假设的架构任务。使用 Claude Code 2.1.303 和 Codex 0.164.0-alpha.11.1，复用本机订阅登录。真实飞书仅核验了认证与现有权限，尚未验证创建文档或发送/更新消息；离线 HTTP 测试不替代租户内验收。
+2026-10-29 在隔离合成 Git 工作区验证了：DSH 简单任务直接路由 → Codex 实际修改指定文件 → Claude Code 独立只读审查 → 本地 Daily Sync 与证据输出；由主控再次核对文件精确内容。另一个复杂任务实际触发一次 DSH → Codex GPT planner 升级并选出 Claude 执行器，该测试只分类，没有执行假设的架构任务。使用 Claude Code 2.1.303 和 Codex 0.164.0-alpha.11.1，复用本机订阅登录。真实飞书已验证独立应用的文档创建、本人 edit 权限分享、摘要卡片发送与原消息更新，以及相同内容零请求；另完成同文档从普通文本块迁移到原生标题、列表、加粗和可点击链接，并以远端读回及浏览器检查核对。消息 GET 不回显按钮 URL，因此该项只核对了发送请求中的目标；这些结果不替代其他使用者在自己租户内的验收。
