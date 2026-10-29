@@ -101,6 +101,7 @@ def parser():
     a.add_argument("target_id", nargs="?", help="publication/binding ID for explicit adopt/rename")
     a.add_argument("--title", help="explicit canonical document title for adopt/rename only")
     a.add_argument("--tree-journal", help="explicit completed native surgery acknowledgement for adopt-timeline only")
+    a.add_argument("--document-only", action="store_true", help="Sync only the app timeline document; never create/update a card")
     modes = a.add_mutually_exclusive_group()
     modes.add_argument("--dry-run", action="store_true")
     modes.add_argument("--confirm", action="store_true")
@@ -150,6 +151,8 @@ def dispatch(args, conf, store):
                             body_scope=args.body_scope, card_signature=conf["publisher"].get("card_signature"))
     if c == "publish":
         if args.id in {"adopt-timeline", "rename-timeline"}:
+            if args.document_only:
+                raise ValueError('--document-only applies only to a report, not adopt/rename')
             if not args.target_id or not args.confirm or args.dry_run:
                 raise ValueError("adopt/rename requires a target ID and explicit --confirm")
             from .timeline import adopt_timeline, rename_timeline
@@ -161,6 +164,10 @@ def dispatch(args, conf, store):
             return rename_timeline(store, conf["publisher"], args.target_id, args.title, confirm=True, retry=args.retry)
         if args.target_id or args.title is not None or args.tree_journal:
             raise ValueError("target ID and --title are only accepted for explicit adopt/rename")
+        if args.document_only:
+            from .timeline import publish_timeline
+            return publish_timeline(store, conf["publisher"], args.id, confirm=args.confirm and not args.dry_run,
+                                    retry=args.retry, document_only=True)
         if args.dry_run or (not args.confirm and not conf["publisher"].get("grants")):
             return preview(store, args.id)
         return publish(store, conf["publisher"], args.id, confirm=args.confirm, retry=args.retry)

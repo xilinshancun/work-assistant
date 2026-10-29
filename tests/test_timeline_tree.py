@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 from work_assistant.feishu import publish, reconcile, http, AmbiguousError, preview, TEXT_BLOCKS
-from work_assistant.timeline import adopt_timeline, rename_timeline
+from work_assistant.timeline import adopt_timeline, rename_timeline, publish_timeline
 from work_assistant import document_tree as tree
 from work_assistant.reports import generate_report
 from work_assistant.util import dumps, digest
@@ -133,6 +133,8 @@ class TreeTimelineTests(Base):
         return self.s.record('report',dict(self.template['data'],period=period,path=str(path),hash=digest(contents),files={n:digest(v.encode()) for n,v in contents.items()}),project_id=self.p['id'])
 
     def send(self,report,**kwargs):return publish(self.s,self.settings,report['id'],confirm=True,base=self.server.base,**kwargs)
+    def document_only(self,report,**kwargs):
+        return publish_timeline(self.s,self.settings,report['id'],confirm=True,base=self.server.base,document_only=True,**kwargs)
     def writes(self,start=0):return [c for c in self.server.calls[start:] if c[0] in {'POST','PATCH','DELETE'} and '/tenant_access_token/' not in c[1]]
     def binding(self):return self.s.records('doc_binding')[0]
     def assertCompleted(self,result):self.assertEqual(result['status'],'completed',result.get('error',result))
@@ -147,6 +149,122 @@ class TreeTimelineTests(Base):
         self.assertEqual([c[0] for c in self.writes(before)],['PATCH','PATCH'])
         self.assertTrue(self.writes(before)[0][1].startswith('/docx/'))
         before=len(self.server.calls);self.assertTrue(self.send(self.s.get(second['report_id']))['no_op']);self.assertEqual(len(self.server.calls),before)
+
+    def test_document_only_backfill_preserves_adopted_newest_tree_and_card(self):
+        first,path,orange,blank=self.surgery('2026-01-29')
+        adopt_timeline(self.s,self.settings,first['publication_id'],confirm=True,tree_journal=str(path),base=self.server.base)
+        newest=copy.deepcopy(self.binding()['data']['sections']['2026-01-29'])
+        preserved=copy.deepcopy(self.server.nodes);cards=copy.deepcopy(self.server.messages)
+        original_publication=copy.deepcopy(self.s.get(first['publication_id']))
+        before=len(self.server.calls)
+        for day in ('2026-01-28','2026-01-27'):
+            report=self.report(day)
+            result=self.document_only(report);self.assertCompleted(result)
+            self.assertEqual(result['document_status'],'synchronized')
+            self.assertEqual(result['message_status'],'not_requested')
+            self.assertIsNone(result['message_id'])
+            count=len(self.server.calls)
+            self.assertTrue(self.document_only(report)['no_op'])
+            self.assertEqual(len(self.server.calls),count)
+        binding=self.binding()['data']
+        self.assertEqual(binding['order'],['2026-01-29','2026-01-28','2026-01-27'])
+        self.assertEqual(self.server.nodes[self.server.root]['children'],[bid for day in binding['order'] for bid in binding['sections'][day]['block_ids']])
+        self.assertEqual(binding['sections']['2026-01-29'],newest)
+        for bid,b in preserved.items():
+            if bid!=self.server.root:self.assertEqual(self.server.nodes[bid],b)
+        self.assertEqual(self.server.nodes[orange]['children'][-1],blank)
+        self.assertEqual(self.server.messages,cards)
+        self.assertEqual(self.s.get(first['publication_id']),original_publication)
+        self.assertFalse(any('/im/v1/messages' in c[1] for c in self.server.calls[before:]))
+        self.assertFalse(any(c[0] in {'PATCH','DELETE'} for c in self.writes(before)))
+
+    def test_document_only_then_explicit_normal_publish_sends_card_without_document_rewrite(self):
+        self.assertCompleted(self.send(self.report('2026-01-29')))
+        history=self.report('2026-01-28')
+        doc=self.document_only(history);self.assertCompleted(doc)
+        before=len(self.server.calls);ids=copy.deepcopy(self.server.nodes)
+        normal=self.send(history);self.assertCompleted(normal)
+        self.assertTrue(normal['message_id']);self.assertNotEqual(normal['publication_id'],doc['publication_id'])
+        self.assertEqual(self.server.nodes,ids)
+        self.assertEqual([(c[0],c[1]) for c in self.writes(before)],[('POST','/im/v1/messages')])
+        count=len(self.server.calls);self.assertTrue(self.send(history)['no_op']);self.assertEqual(len(self.server.calls),count)
+        self.assertEqual(self.s.get(doc['publication_id'])['data']['message_status'],'not_requested')
+
+    def test_document_only_revision_keeps_existing_card_hash_receipt_and_ordinary_checkpoint(self):
+        first=self.send(self.report());self.assertCompleted(first)
+        original=copy.deepcopy(self.s.get(first['publication_id']));cards=copy.deepcopy(self.server.messages)
+        changed=self.report(blocks=[block(2,'Coverage'),callout(2,'Corrected history'),callout(5)],card='New summary not requested yet')
+        before=len(self.server.calls);doc=self.document_only(changed);self.assertCompleted(doc)
+        self.assertEqual(doc['message_id'],first['message_id'])
+        self.assertEqual(doc['preserved_card_hash'],original['data']['hash'])
+        self.assertEqual(doc['preserved_card_payload_hash'],original['data']['card_payload_hash'])
+        self.assertEqual(self.s.get(first['publication_id']),original)
+        self.assertEqual(self.server.messages,cards)
+        self.assertFalse(any('/im/v1/messages' in c[1] for c in self.server.calls[before:]))
+        count=len(self.server.calls);self.assertTrue(self.document_only(changed)['no_op']);self.assertEqual(len(self.server.calls),count)
+        before=len(self.server.calls);normal=self.send(changed);self.assertCompleted(normal)
+        self.assertEqual(normal['message_id'],first['message_id'])
+        self.assertEqual([(c[0],c[1]) for c in self.writes(before)],[('PATCH','/im/v1/messages/'+first['message_id'])])
+
+    def test_document_only_unknown_insert_stops_both_scopes_and_reconciles_without_messages(self):
+        self.assertCompleted(self.send(self.report('2026-01-29')))
+        history=self.report('2026-01-28')
+        result=self.document_only(history,transport=self.ambiguous(lambda m,p:m=='POST' and p.endswith('/descendant')))
+        self.assertEqual(result['status'],'outcome_unknown')
+        self.assertEqual(result['document_status'],'outcome_unknown')
+        ids=copy.deepcopy(self.server.nodes);before=len(self.server.calls)
+        with self.assertRaises(ValueError):self.document_only(history,retry=True)
+        with self.assertRaises(ValueError):self.send(history,retry=True)
+        self.assertEqual(len(self.server.calls),before)
+        inspected=reconcile(self.s,self.settings,result['publication_id'],base=self.server.base)
+        self.assertEqual(inspected['inspection']['section']['phase'],'complete')
+        self.assertEqual(self.writes(before),[])
+        reconcile(self.s,self.settings,result['binding_record_id'],resolution='retry_authorized',reason='Operator inspected exact history tree',base=self.server.base)
+        self.assertEqual(self.writes(before),[])
+        done=self.document_only(history,retry=True);self.assertCompleted(done)
+        self.assertEqual(done['message_status'],'not_requested')
+        self.assertEqual(self.server.nodes,ids)
+        self.assertEqual(self.writes(before),[])
+        self.assertFalse(any('/im/v1/messages' in c[1] for c in self.server.calls[before:]))
+
+    def test_document_only_unknown_can_complete_via_publication_without_card_receipt(self):
+        self.assertCompleted(self.send(self.report('2026-01-29')))
+        history=self.report('2026-01-28',blocks=[callout(2)])
+        result=self.document_only(history,transport=self.ambiguous(lambda m,p:m=='POST' and p.endswith('/descendant')))
+        self.assertEqual(result['status'],'outcome_unknown');before=len(self.server.calls)
+        done=reconcile(self.s,self.settings,result['publication_id'],resolution='completed',reason='Operator checked exact complete history tree',base=self.server.base)
+        self.assertEqual(done['publication']['status'],'completed')
+        self.assertEqual(done['publication']['document_status'],'synchronized')
+        self.assertIsNone(done['publication']['message_id'])
+        self.assertEqual(self.writes(before),[])
+        self.assertFalse(any('/im/v1/messages' in c[1] for c in self.server.calls[before:]))
+        count=len(self.server.calls);self.assertTrue(self.document_only(history)['no_op']);self.assertEqual(len(self.server.calls),count)
+
+    def test_document_only_unknown_absent_insert_requires_explicit_original_scope_retry(self):
+        self.assertCompleted(self.send(self.report('2026-01-29')))
+        history=self.report('2026-01-28')
+        result=self.document_only(history,transport=self.ambiguous(lambda m,p:m=='POST' and p.endswith('/descendant'),after=False))
+        self.assertEqual(result['status'],'outcome_unknown');before=len(self.server.calls)
+        reconcile(self.s,self.settings,result['publication_id'],resolution='retry_authorized',reason='Operator checked absent pending insertion',base=self.server.base)
+        with self.assertRaisesRegex(ValueError,'other delivery scope unresolved'):self.send(history,retry=True)
+        self.assertEqual(self.writes(before),[])
+        done=self.document_only(history,retry=True);self.assertCompleted(done)
+        self.assertEqual(sum(c[1].endswith('/descendant') for c in self.writes(before)),1)
+        self.assertFalse(any('/im/v1/messages' in c[1] for c in self.server.calls[before:]))
+
+    def test_document_only_reconcile_preserved_card_skips_get_and_rejects_message_adoption(self):
+        first=self.send(self.report());self.assertCompleted(first)
+        changed=self.report(blocks=[block(2,'Coverage'),callout(2,'Changed'),callout(5),block(4,'Other section')])
+        result=self.document_only(changed,transport=self.ambiguous(lambda m,p:m=='PATCH'))
+        self.assertEqual(result['status'],'outcome_unknown');before=len(self.server.calls)
+        for remote in ({'message_id':first['message_id']},{'message_absent':True}):
+            with self.assertRaisesRegex(ValueError,'does not accept message confirmations'):
+                reconcile(self.s,self.settings,result['publication_id'],resolution='retry_authorized',reason='Operator checked',remote_ids=remote,base=self.server.base)
+        done=reconcile(self.s,self.settings,result['publication_id'],resolution='completed',reason='Operator checked exact changed tree',base=self.server.base)
+        self.assertEqual(done['publication']['message_id'],first['message_id'])
+        self.assertEqual(done['publication']['status'],'completed')
+        self.assertEqual(self.writes(before),[])
+        self.assertFalse(any('/im/v1/messages' in c[1] for c in self.server.calls[before:]))
 
     def test_new_day_keeps_history_tree_ids_text_edits_and_comments(self):
         first=self.send(self.report('2026-01-14'));self.assertCompleted(first)
@@ -298,9 +416,9 @@ class TreeTimelineTests(Base):
         result=self.send(self.report(blocks=[block(2,'Coverage'),changed,callout(5),block(4,'Other section')]))
         self.assertEqual(result['status'],'needs_user');self.assertIn(old,self.server.nodes);self.assertEqual(self.server.messages,card)
 
-    def surgery(self):
+    def surgery(self,period='2026-01-15'):
         flat=[block(2,'Coverage'),block(4,'Deliverables'),block(12,'Synthetic detail',True),block(4,'Sync'),block(12,'Synthetic detail',True),block(4,'Other section')]
-        report=self.report(blocks=flat,tree_format=False)
+        report=self.report(period,blocks=flat,tree_format=False)
         first=publish(self.s,dict(self.settings,document_layout='per_period'),report['id'],confirm=True,base=self.server.base)
         self.assertCompleted(first);ids=list(self.server.nodes[self.server.root]['children'])
         orange=self.server.add({'block_type':19,'callout':callout(2)['callout'],'children':[]},self.server.root)

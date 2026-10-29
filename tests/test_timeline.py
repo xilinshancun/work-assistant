@@ -6,10 +6,10 @@ import urllib.parse
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
-from work_assistant.cli import parser
+from work_assistant.cli import parser, dispatch
 from work_assistant.config import load
 from work_assistant.feishu import publish, reconcile, http, AmbiguousError
-from work_assistant.timeline import adopt_timeline, rename_timeline, binding_key, root_ids
+from work_assistant.timeline import adopt_timeline, rename_timeline, binding_key, root_ids, publish_timeline
 from work_assistant.reports import generate_report
 from work_assistant.store import Busy
 from work_assistant.util import dumps, digest
@@ -45,6 +45,63 @@ class TimelineTests(Base):
 
     def writes(self,start=0):
         return [c for c in self.server.calls[start:] if c[0] in {'POST','PATCH','DELETE'} and '/tenant_access_token/' not in c[1]]
+
+    def test_document_only_cli_requires_app_timeline_and_explicit_confirm_even_with_grant(self):
+        report=self.report()
+        with patch('work_assistant.timeline.make_client',side_effect=AssertionError('dry run needs no client')):
+            for flags in ([],['--dry-run']):
+                args=parser().parse_args(['publish',report['id'],'--document-only']+flags)
+                result=dispatch(args,dict(self.conf,publisher=dict(self.settings,grants=['synthetic-grant'])),self.s)
+                self.assertEqual(result['status'],'dry_run')
+                self.assertEqual(result['message_status'],'not_requested')
+            for mode,layout in (('app','per_period'),('webhook','timeline'),('webhook','per_period')):
+                args=parser().parse_args(['publish',report['id'],'--document-only','--confirm'])
+                with self.assertRaisesRegex(ValueError,'requires configured app timeline'):
+                    dispatch(args,dict(self.conf,publisher=dict(self.settings,mode=mode,document_layout=layout)),self.s)
+        for command in ('adopt-timeline','rename-timeline'):
+            args=parser().parse_args(['publish',command,'synthetic-target','--document-only','--confirm'])
+            with self.assertRaisesRegex(ValueError,'not adopt/rename'):dispatch(args,dict(self.conf,publisher=self.settings),self.s)
+        self.assertEqual(self.server.calls,[])
+        self.assertEqual(self.s.records('publication'),[])
+        self.assertEqual(self.s.records('doc_binding'),[])
+
+    def test_document_only_cli_confirm_uses_flat_timeline_without_message_request(self):
+        from work_assistant.feishu import make_client
+        report=self.report()
+        args=parser().parse_args(['publish',report['id'],'--document-only','--confirm'])
+        with patch('work_assistant.timeline.make_client',return_value=make_client(self.settings,base=self.server.base)):
+            result=dispatch(args,dict(self.conf,publisher=self.settings),self.s)
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(result['document_status'],'synchronized')
+        self.assertEqual(result['message_status'],'not_requested')
+        self.assertIsNone(result['message_id'])
+        self.assertFalse(any('/im/v1/messages' in c[1] for c in self.server.calls))
+        before=len(self.server.calls)
+        self.assertTrue(publish_timeline(self.s,self.settings,report['id'],confirm=True,document_only=True,base=self.server.base)['no_op'])
+        self.assertEqual(len(self.server.calls),before)
+
+    def test_document_only_does_not_bypass_unknown_existing_card(self):
+        report=self.report()
+        def lost(method,url,body,headers):
+            result=http(method,url,body,headers)
+            if method=='POST' and '/im/v1/messages?' in url:raise AmbiguousError('synthetic card response lost')
+            return result
+        result=self.send(report,transport=lost)
+        self.assertEqual(result['status'],'outcome_unknown')
+        before=len(self.server.calls)
+        with self.assertRaisesRegex(ValueError,'other delivery scope unresolved'):
+            publish_timeline(self.s,self.settings,report['id'],confirm=True,document_only=True,base=self.server.base)
+        self.assertEqual(len(self.server.calls),before)
+
+    def test_document_only_existing_per_period_card_requires_explicit_adoption(self):
+        report=self.report()
+        first=publish(self.s,dict(self.settings,document_layout='per_period'),report['id'],confirm=True,base=self.server.base)
+        self.assertEqual(first['status'],'completed')
+        before=len(self.server.calls)
+        with self.assertRaisesRegex(ValueError,'adopt-timeline first'):
+            publish_timeline(self.s,self.settings,report['id'],confirm=True,document_only=True,base=self.server.base)
+        self.assertEqual(len(self.server.calls),before)
+        self.assertEqual(self.s.records('doc_binding'),[])
 
     def test_cross_day_same_doc_newest_first_history_ids_untouched_and_noop(self):
         day1=self.report('2026-01-14');first=self.send(day1);self.assertEqual(first['status'],'completed')

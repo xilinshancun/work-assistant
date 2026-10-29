@@ -36,6 +36,57 @@ New dates insert a date heading1 and body at the correct top-level position;
 same-day cards reuse their existing message. The card is untouched while document
 work is incomplete or ambiguous.
 
+Historical document-only backfill uses the same binding, per-document/per-date
+locks, flat/tree engine, preflight checks and checkpoints:
+
+```sh
+python3 -m work_assistant publish REPORT_ID --document-only --dry-run
+python3 -m work_assistant publish REPORT_ID --document-only --confirm
+```
+
+This option requires configured `mode=app` and `document_layout=timeline`;
+per-period and webhook modes are rejected, without fallback. It applies only to
+report publication, not adopt/rename. Without explicit `--confirm` it is always
+an offline preview, even if a destination grant exists. Report/model content
+cannot select the delivery scope. There is no source rewrite or schedule change.
+
+Successful document-only publication records `delivery_scope=document_only`,
+`document_status=synchronized`, and `message_status=not_requested`. Its overall
+`completed` means only the document work has finished. The section is inserted
+in descending date order; other dates retain all node IDs, content, comments,
+styles, and adopted/preserved children. No message API is called, including
+message GETs during document-only reconciliation. An existing same-day message
+ID is retained as a receipt, with its ordinary publication ID and card hashes;
+the ordinary publication record and remote card remain untouched.
+
+Document-only and ordinary document+card publication keep separate revision
+records under the same destination/project/date identity and locks. The default
+scope of older records is document+card. Repeating an identical completed
+document-only input with its section still acknowledged returns a local no-op
+with zero requests. It does not count as an ordinary card delivery: a later,
+separately authorized ordinary `publish REPORT_ID --confirm` sends that day's
+missing card, or updates its known card when needed, while reusing an already
+synchronized document section. The tool never automatically invokes that step.
+
+Unknown results block replay and scope switching. Complete/recover the original
+scope first; adding `--retry` or changing scope cannot bypass an unresolved
+record. Inspection and explicit resolution reuse the existing `reconcile`
+commands, without message-ID/absence confirmations for document-only records:
+
+```sh
+python3 -m work_assistant reconcile PUBLICATION_ID
+python3 -m work_assistant reconcile PUBLICATION_ID \
+  --resolution retry_authorized --reason 'Operator checked exact historical tree'
+python3 -m work_assistant publish REPORT_ID --document-only --confirm --retry
+```
+
+An exact, fully inserted document-only section can also be explicitly resolved
+`completed` via its publication or binding ID, with a reason and full document
+readback; no card receipt is required. Partial insertion cannot be marked
+complete. Cancellation retains the unresolved details and does not grant
+scope-switching or replay permission. Neither branch writes to a different
+date or repeats an ambiguous effect without the established recovery checks.
+
 Existing user containers need explicit adoption. For the reviewed private
 surgery acknowledgement, use:
 

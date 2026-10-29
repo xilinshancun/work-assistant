@@ -353,21 +353,35 @@ def _authority(settings, destination, confirm):
         raise ValueError('live publish requires --confirm or an exact destination grant')
 
 
-def publish_timeline(store, settings, report_id, confirm=False, transport=None, base=None, retry=False, process=None):
+def publish_timeline(store, settings, report_id, confirm=False, transport=None, base=None, retry=False, process=None,
+                     document_only=False):
     from .feishu import http, BASE, send_card
+    if type(document_only) is not bool:
+        raise ValueError('document_only must be an explicit boolean')
+    if document_only and (settings.get('mode')!='app' or settings.get('document_layout','per_period')!='timeline'):
+        raise ValueError('document-only requires configured app timeline layout')
     payload=preview(store,report_id);report=store.get(report_id)
+    if document_only and not confirm:
+        return dict(payload,delivery_scope='document_only',message_status='not_requested',confirm_required=True,
+                    note='local document-only preview; no messages requested; explicit --confirm required')
     client=make_client(settings, transport or http, base or BASE, process)
     destination=client.destination();_authority(settings,destination,confirm)
     identity=_card_identity(destination,report);key=binding_key(destination,report['project_id'])
     with store.claim(['doc:'+key,'publish:'+identity]):
         # Reload both records only after acquiring the shared document lock.
         record=find_binding(store,key)
-        prior=next((r for r in store.records('publication') if r['data']['identity']==identity),None)
-        if prior and prior['data'].get('layout_lock'):
-            raise NeedsUser('publication layout_lock prevents flat timeline publication')
+        candidates=[r for r in store.records('publication') if r['data']['identity']==identity]
+        scope='document_only' if document_only else 'document_and_card'
+        prior=next((r for r in candidates if r['data'].get('delivery_scope','document_and_card')==scope),None)
+        other=next((r for r in candidates if r['data'].get('delivery_scope','document_and_card')!=scope),None)
+        if other and (other['data']['status']!='completed' or other['data'].get('pending') or other['data'].get('outcome_unresolved')):
+            raise ValueError('other delivery scope unresolved; finish/reconcile the original publication before switching scope')
+        for previous in (prior,other):
+            if previous and previous['data'].get('layout_lock'):
+                raise NeedsUser('publication layout_lock prevents timeline publication')
+            if previous and previous['data'].get('layout')!='timeline':
+                raise ValueError('existing per-period publication requires explicit publish adopt-timeline first')
         if record:guard_layout(store, record['data'])
-        if prior and prior['data'].get('layout')!='timeline':
-            raise ValueError('existing per-period publication requires explicit publish adopt-timeline first')
         if record and record['data']['status'] in {'publishing','outcome_unknown','needs_user','cancelled'}:
             raise ValueError('timeline binding unresolved; reconcile '+record['id']+' before publishing')
         if record and record['data']['status'] in {'failed','retry_authorized'} and not retry:
@@ -385,12 +399,19 @@ def publish_timeline(store, settings, report_id, confirm=False, transport=None, 
             raise ValueError('pending explicit timeline rename must be reconciled/finished first')
         wanted=section_blocks(payload,period);wanted_hash=digest(wanted)
         section=binding['sections'].get(period)
-        pubhash=digest([payload['hash'],'feishu-docx-button-v1'])
+        pubhash=digest([payload['hash'],'timeline-document-only-v1' if document_only else 'feishu-docx-button-v1'])
         if (binding['status']=='completed' and not binding.get('operation') and section and section['section_hash']==wanted_hash and
                 prior and prior['data']['status']=='completed' and prior['data'].get('hash')==pubhash):
             return dict(prior['data'],publication_id=prior['id'],no_op=True)
         data=copy.deepcopy(prior['data']) if prior else {'identity':identity,'destination':destination,'document_id':None,
             'message_id':None,'block_ids':[],'mode':'app','steps':[]}
+        if document_only:
+            # Preserve the ordinary card receipt separately; never copy/update its
+            # publication record or mistake its hash for this document receipt.
+            card_receipt=other['data'] if other else {}
+            data.update(delivery_scope='document_only',document_status='pending',message_status='not_requested',
+                        message_id=card_receipt.get('message_id'),card_publication_id=other['id'] if other else None,
+                        preserved_card_hash=card_receipt.get('hash'),preserved_card_payload_hash=card_receipt.get('card_payload_hash'))
         data.update(status='publishing',layout='timeline',binding_id=key,binding_record_id=record['id'],
                     hash=pubhash,report_hash=payload['hash'],report_id=report_id,pending=None,block_ids=[])
         data.pop('error',None)
@@ -436,6 +457,13 @@ def publish_timeline(store, settings, report_id, confirm=False, transport=None, 
                 binding.update(status='completed',pending=None,ack_revision=actual['revision']);engine.save()
             document_committed=True
             if binding.get('document_tree'):data['document_tree']=copy.deepcopy(binding['document_tree'])
+            if document_only:
+                data.update(status='completed',document_status='synchronized',pending=None,document_report_id=report_id)
+                store.update_record(publication['id'],data)
+                store.record('event',{'action':'timeline_document_only_completed','publication_id':publication['id'],
+                    'binding_id':key,'report_id':report_id,'date':period,'message_status':'not_requested',
+                    'preserved_message_id':data.get('message_id')},project_id=report['project_id'])
+                return dict(data,publication_id=publication['id'])
             card=document_card(payload['card'],binding['document_id'])
             card_hash=digest(card)
             prior_card_hash=data.get('card_payload_hash')
@@ -462,6 +490,7 @@ def publish_timeline(store, settings, report_id, confirm=False, transport=None, 
                 data['status']='failed' if isinstance(exc,APIError) else 'outcome_unknown'
                 if not isinstance(exc,APIError):data['outcome_unresolved']=True
             data.update(document_id=binding['document_id'],error=redact(str(exc)) if isinstance(exc,APIError) else 'timeline/card outcome ambiguous; inspect before retry')
+            if document_only:data['document_status']=data['status']
             store.update_record(publication['id'],data)
             if isinstance(exc,(KeyboardInterrupt,SystemExit)):raise
         return dict(data,publication_id=publication['id'])
@@ -580,6 +609,9 @@ def reconcile_timeline(store,settings,ident,resolution=None,reason=None,remote_i
         binding_record=store.get(binding_record['id']);binding=binding_record['data']
         if resolution:guard_layout(store, binding)
         publication=store.get(pub_id) if pub_id else None
+        document_only=bool(publication and publication['data'].get('delivery_scope')=='document_only')
+        if document_only and set(remote_ids)&{'message_id','message_absent'}:
+            raise ValueError('document-only reconciliation does not accept message confirmations')
         if initial['kind']=='doc_binding' and binding.get('active_publication')!=pub_id:
             raise ValueError('timeline advanced before inspection lock; inspect the current binding again')
         if client.destination()!=binding['destination']:raise ValueError('timeline inspection destination mismatch')
@@ -602,7 +634,7 @@ def reconcile_timeline(store,settings,ident,resolution=None,reason=None,remote_i
                 inspected['document']={'document_id':document_id,'revision':view['revision'],'title':view['title'],'block_ids':view['ids']}
         elif not (binding.get('pending') or {}).get('op') in (None,'create_doc'):
             raise NeedsUser('unknown timeline operation has no document ID')
-        if publication and (publication['data'].get('message_id') or remote_ids.get('message_id')):
+        if publication and not document_only and (publication['data'].get('message_id') or remote_ids.get('message_id')):
             message_id=remote_ids.get('message_id',publication['data'].get('message_id'))
             if type(message_id) is not str or not message_id:raise ValueError('message_id must be a nonempty string')
             inspected['message']=client.request('GET','/im/v1/messages/'+urllib.parse.quote(message_id,safe=''))
@@ -632,7 +664,7 @@ def reconcile_timeline(store,settings,ident,resolution=None,reason=None,remote_i
         if resolution!='cancelled':
             if binding.get('operation'):
                 if resolution=='completed' and view['phase']!='complete':raise ValueError('partial timeline section cannot be completed')
-                if initial['kind']=='publication' and resolution=='completed':
+                if initial['kind']=='publication' and resolution=='completed' and not document_only:
                     raise ValueError('resolve document via binding or retry_authorized; card must finish separately')
                 op=binding['operation'];op.update(new_ids=view['new_ids'],pending_batch_count=0,phase=view['phase'])
                 if op['kind']=='tree':engine.accept_view(view)
@@ -657,7 +689,21 @@ def reconcile_timeline(store,settings,ident,resolution=None,reason=None,remote_i
             data=publication['data']
             if 'message_id' in remote_ids:data['message_id']=remote_ids['message_id']
             unresolved=data['status'] in {'publishing','outcome_unknown','needs_user','failed','cancelled','retry_authorized'}
-            if unresolved:
+            if document_only and unresolved:
+                if resolution=='completed':
+                    report=store.get(data['report_id'])
+                    section=binding['sections'].get(report['data']['period'])
+                    wanted_hash=digest(section_blocks(preview(store,report['id']),report['data']['period']))
+                    if not doc_complete or not section or section['section_hash']!=wanted_hash:
+                        raise ValueError('document-only completion requires the exact synchronized report section')
+                    data.update(status='completed',document_status='synchronized',document_report_id=report['id'],
+                                pending=None,outcome_unresolved=False,document_id=binding['document_id'])
+                elif resolution=='cancelled':
+                    data.update(status='cancelled',document_status='cancelled')
+                else:
+                    data.update(status='retry_authorized',document_status='pending',pending=None,
+                                outcome_unresolved=False,document_id=binding['document_id'])
+            elif unresolved:
                 if resolution=='completed' and not binding.get('operation') and not binding.get('rename_request') and initial['kind']=='publication':
                     if not data.get('message_id'):raise ValueError('completed publication needs a verified message_id')
                     data.update(status='completed',pending=None,outcome_unresolved=False)
