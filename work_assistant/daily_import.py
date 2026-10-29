@@ -6,6 +6,7 @@ import stat
 from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .reports import STYLE, save_report
@@ -14,7 +15,7 @@ from .util import digest, dumps, outbound_guard, strict_json
 MAX_STATE = 1024 * 1024
 MAX_FILE = 20 * 1024 * 1024
 MAX_SUMMARY = 6000
-BLOCK_TYPES = {"text": 2, "heading2": 4, "heading3": 5, "bullet": 12}
+BLOCK_TYPES = {"text": 2, **{"heading%s" % level: level + 2 for level in range(1, 7)}, "bullet": 12}
 MAX_NATIVE_TEXT = 10000
 SCOPE = ("源报告陈述 / Reported source assertions. 导入仅核对日期、水位和文件哈希；"
          "不代表独立测量或科学复现 / not independently measured or reproduced.")
@@ -28,7 +29,19 @@ def export_data(value):
     """
     if type(value) is str:
         outbound_guard(value)
-        path_text = re.sub(r"https?://[^\s<>\"']+", "", value, flags=re.I)
+        def url_paths(match):
+            try:
+                url = urlsplit(match.group(0))
+            except ValueError:
+                raise ValueError("daily export contains a malformed URL; cannot check paths safely") from None
+            parameters = url.query + " " + url.fragment
+            for _ in range(8):
+                decoded = unquote(parameters)
+                if decoded == parameters:
+                    return " " + parameters + " "
+                parameters = decoded
+            raise ValueError("daily export URL parameters are too deeply encoded to check safely")
+        path_text = re.sub(r"https?://[^\s<>\"']+", url_paths, value, flags=re.I)
         if re.search(r"(?i)(?:file://|(?:^|[\s\"'(<])~/|\b[A-Z]:[\\/]|\\\\[^\s\\]+\\|"
                      r"/(?:Users|home|private|tmp|var|etc|opt|srv|root|mnt|Volumes)/)", path_text):
             raise ValueError("daily export contains a local path; remove it from the source text")
@@ -67,6 +80,45 @@ def block_text(block):
     return "".join(e["text_run"]["content"] for e in block[key]["elements"])
 
 
+def styled_markdown(elements, card=False, outer_bold=False):
+    result = []
+    for element in elements:
+        run = element["text_run"]
+        text = card_md_text(run["content"]) if card else md_text(run["content"])
+        style = run.get("text_element_style", {})
+        if style.get("inline_code"):
+            text = "`" + text + "`"
+        if style.get("italic"):
+            text = "*" + text + "*"
+        if style.get("bold") and not outer_bold:
+            text = "**" + text + "**"
+        if style.get("strikethrough"):
+            text = "~~" + text + "~~"
+        result.append(text)
+    return "".join(result)
+
+
+def element_html(elements):
+    result = []
+    for element in elements:
+        run = element["text_run"]
+        part = escape(run["content"])
+        style = run.get("text_element_style", {})
+        for key, tag in (("italic", "em"), ("bold", "strong"), ("strikethrough", "del"),
+                         ("underline", "u"), ("inline_code", "code")):
+            if style.get(key):
+                part = "<%s>%s</%s>" % (tag, part, tag)
+        result.append(part)
+    return "".join(result)
+
+
+def coverage_text(start, cutoff, zone_name):
+    def label(stamp):
+        year = "%s年" % stamp.year if start.year != cutoff.year else ""
+        return year + "%s月%s日 %s" % (stamp.month, stamp.day, stamp.strftime("%H:%M"))
+    return "%s—%s · %s" % (label(start), label(cutoff), "北京时间" if zone_name == "Asia/Shanghai" else zone_name)
+
+
 def native_html(blocks):
     result, in_list = [], False
     for block in blocks:
@@ -77,17 +129,8 @@ def native_html(blocks):
         elif kind != "bullet" and in_list:
             result.append("</ul>")
             in_list = False
-        tag = {"heading2": "h2", "heading3": "h3", "bullet": "li", "text": "p"}[kind]
-        text = ""
-        for element in block[kind]["elements"]:
-            run = element["text_run"]
-            part = escape(run["content"])
-            style = run.get("text_element_style", {})
-            if style.get("italic"):
-                part = "<em>" + part + "</em>"
-            if style.get("bold"):
-                part = "<strong>" + part + "</strong>"
-            text += part
+        tag = "h" + kind[7:] if kind.startswith("heading") else {"bullet": "li", "text": "p"}[kind]
+        text = element_html(block[kind]["elements"])
         result.append("<%s class='source-line'>%s</%s>" % (tag, text, tag))
     return "".join(result) + ("</ul>" if in_list else "")
 
@@ -141,13 +184,13 @@ def _timestamp(value, label):
 
 class VisibleReport(HTMLParser):
     """Extract text only; arbitrary markup, attributes and links never reach output."""
-    excluded = {"head", "script", "style", "footer", "nav", "template", "noscript",
+    excluded = {"head", "script", "style", "nav", "template", "noscript",
                 "iframe", "object", "embed", "svg", "canvas"}
     void = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
             "meta", "param", "source", "track", "wbr"}
     blocks = {"address", "article", "aside", "blockquote", "br", "dd", "details", "div",
               "dl", "dt", "figcaption", "figure", "h1", "h2", "h3", "h4", "h5", "h6",
-              "header", "hr", "li", "main", "ol", "p", "pre", "section", "summary",
+              "header", "footer", "hr", "li", "main", "ol", "p", "pre", "section", "summary",
               "caption", "table", "tr", "ul"}
     optional = {"p", "li", "dt", "dd", "rt", "rp", "option", "optgroup", "colgroup",
                 "thead", "tbody", "tfoot", "tr", "td", "th"}
@@ -215,7 +258,7 @@ class VisibleReport(HTMLParser):
             self._append(" | ")
         first_title = tag == "h1" and not hidden and self._active() and not self.title_seen
         self.title_seen = self.title_seen or first_title
-        node = {"tag": tag, "hidden": bool(hidden), "summary": summary, "children": []}
+        node = {"tag": tag, "hidden": bool(hidden), "summary": summary, "title": first_title, "children": []}
         (self.stack[-1][4]["children"] if self.stack else self.tree).append(node)
         self.stack.append((tag, bool(hidden), summary, first_title, node))
         if summary and self._active():
@@ -289,8 +332,27 @@ class VisibleReport(HTMLParser):
         find(self.tree)
         if len(mains) != 1:
             raise ValueError("source requires exactly one visible main for native delivery")
-        result, summary_parts = [], []
-        inline_tags = {"strong", "b", "em", "i", "span", "a", "code", "s", "small", "u", "br"}
+        def has_title(node):
+            return node.get("title") or any(has_title(c) for c in node["children"] if type(c) is dict)
+        def check_outside(nodes, parent=""):
+            for node in nodes:
+                if type(node) is str:
+                    if node.strip():
+                        raise ValueError("visible content outside main is unsupported; move business content into main")
+                    continue
+                if node["hidden"] or node is mains[0] or node["title"]:
+                    continue
+                if parent == "body" and node["tag"] == "header" and has_title(node):
+                    continue
+                check_outside(node["children"], node["tag"])
+        check_outside(self.tree)
+        result, summary_parts, summary_elements = [], [], []
+        inline_tags = {"strong", "b", "em", "i", "span", "a", "code", "s", "small", "u", "br", "wbr",
+                       "mark", "time", "abbr", "kbd", "del", "ins", "label", "var", "samp", "cite", "dfn", "bdi", "bdo"}
+        containers = {"main", "section", "article", "header", "footer", "div", "ul", "ol", "li", "dl", "dt", "dd",
+                      "address", "blockquote", "figure", "figcaption", "details", "table", "thead", "tbody", "tfoot"}
+        leaf_blocks = {"h%s" % level for level in range(1, 7)} | {"summary", "p", "caption", "tr", "pre"}
+        cell_blocks = leaf_blocks | {"div", "section", "article", "header", "li"}
 
         def inline(node, style=None, preserve=False):
             style = dict(style or {})
@@ -300,15 +362,30 @@ class VisibleReport(HTMLParser):
             if node["hidden"]:
                 return []
             tag = node["tag"]
+            if tag not in inline_tags | leaf_blocks | containers | {"td", "th"}:
+                raise ValueError("unsupported HTML element in native content; cannot preserve its semantics")
             if tag in {"strong", "b"}:
                 style["bold"] = True
             if tag in {"em", "i"}:
                 style["italic"] = True
+            if tag in {"s", "del"}:
+                style["strikethrough"] = True
+            if tag in {"u", "ins"}:
+                style["underline"] = True
+            if tag in {"code", "kbd", "samp"}:
+                style["inline_code"] = True
             if tag == "br":
                 return [("\n", style)]
-            if tag in {"td", "th"}:
-                return [(" | ", {})] + [run for child in node["children"] for run in inline(child, style, preserve)]
-            return [run for child in node["children"] for run in inline(child, style, preserve)]
+            runs, previous_block = [], False
+            for child in node["children"]:
+                child_runs = inline(child, style, preserve)
+                child_block = type(child) is dict and child["tag"] in cell_blocks
+                if child_runs and any(t.strip() for t, _ in child_runs):
+                    if (child_block or previous_block) and any(t.strip() for t, _ in runs):
+                        runs.append(("; ", {}))
+                    previous_block = child_block
+                runs.extend(child_runs)
+            return ([(" | ", {})] if tag in {"td", "th"} else []) + runs
 
         def emit(kind, runs, in_summary=False, preserve=False):
             runs = [(text, style) for text, style in runs if text]
@@ -334,16 +411,22 @@ class VisibleReport(HTMLParser):
             result.append({"block_type": BLOCK_TYPES[kind], kind: {"elements": elements}})
             if in_summary and kind in {"text", "bullet"}:
                 summary_parts.append(text)
+                summary_elements.append(elements)
             if len(result) > 999:  # One additional coverage block is generated below.
                 raise ValueError("document too large; native delivery supports at most 1000 blocks")
 
         def walk(node, in_summary=False, inherited_kind="text"):
-            if node["hidden"] or node["tag"] in {"header", "h1"}:
+            if node["hidden"] or node["title"]:
                 return
             tag = node["tag"]
+            if tag not in containers | leaf_blocks | inline_tags | {"hr"}:
+                raise ValueError("unsupported HTML element in native content; cannot preserve its semantics")
+            if tag == "hr":
+                return
             in_summary = in_summary or node["summary"]
-            if tag in {"h2", "h3", "summary", "p", "caption", "tr", "pre"}:
-                kind = {"h2": "heading2", "h3": "heading3", "summary": "heading2"}.get(tag, inherited_kind)
+            if tag in leaf_blocks:
+                kind = ("heading" + tag[1:] if tag.startswith("h") else
+                        "heading2" if tag == "summary" else inherited_kind)
                 if tag == "p" and in_summary:
                     kind = "bullet"
                 if tag == "pre":
@@ -374,7 +457,7 @@ class VisibleReport(HTMLParser):
         walk(mains[0])
         if not result or not summary_parts:
             raise ValueError("native delivery requires main content and a summary content paragraph")
-        return result, summary_parts
+        return result, summary_parts, summary_elements
 
 
 def _evidence_summary(evidence):
@@ -446,8 +529,7 @@ def render_import(snapshot):
                                               ("title", "summary", "body", "coverage", "evidence"))
     zone = ZoneInfo(snapshot["timezone"])
     start, cutoff = (_timestamp(coverage[k], k).astimezone(zone) for k in ("covered_from", "covered_until"))
-    interval = "覆盖区间：%s — %s（%s）" % (
-        start.strftime("%Y-%m-%d %H:%M"), cutoff.strftime("%Y-%m-%d %H:%M"), snapshot["timezone"])
+    interval = coverage_text(start, cutoff, snapshot["timezone"])
     evidence_lines = ["证据摘要 / Evidence (reported)"]
     evidence_lines += ["%s: %s (sources: %s)" % (i["id"], i["claim"], ", ".join(i["source_ids"]))
                        for i in selected["items"]]
@@ -466,12 +548,18 @@ def render_import(snapshot):
     time_hint = cutoff.strftime("截至 %m-%d %H:%M")
     summary_paragraphs = snapshot["summary_paragraphs"]
     lead, bullets = summary_paragraphs[0], summary_paragraphs[1:]
+    summary_elements = snapshot["summary_elements"]
+    bullet_divs = []
+    for text, elements in zip(bullets, summary_elements[1:]):
+        struck = any(e["text_run"].get("text_element_style", {}).get("strikethrough") for e in elements)
+        bullet_divs.append({"tag": "div", "text": {"tag": "lark_md" if struck else "plain_text",
+                           "content": "• " + (styled_markdown(elements, card=True) if struck else text)}})
     signature = "工作助理 · %s · %s" % (snapshot["project"], time_hint)
     card = {"config": {"wide_screen_mode": True, "update_multi": True},
             "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
-            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**" + card_md_text(lead) + "**"}},
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**" + styled_markdown(summary_elements[0], card=True, outer_bold=True) + "**"}},
                          {"tag": "hr"}]
-                         + [{"tag": "div", "text": {"tag": "plain_text", "content": "• " + text}} for text in bullets]
+                         + bullet_divs
                          + [{"tag": "note", "elements": [{"tag": "plain_text", "content": signature}]}]}
     # The publisher inserts the remote document's default-outline button before the final note.
 
@@ -490,14 +578,16 @@ def render_import(snapshot):
                                 + "</section><a href='evidence.html'>证据 / Evidence</a>"),
             "daily-sync.md": "# " + md_text(title) + "\n\n" + md_text(interval)
                              + "\n\n" + "\n\n".join(
-                                 ({4: "## ", 5: "### ", 12: "- "}.get(b["block_type"], "") + md_text(block_text(b)))
+                                 (("#" * (b["block_type"] - 2) + " " if 3 <= b["block_type"] <= 8 else
+                                   "- " if b["block_type"] == 12 else "") +
+                                  styled_markdown(b[next(k for k, n in BLOCK_TYPES.items() if n == b["block_type"])]["elements"]))
                                  for b in snapshot["native_blocks"]) + "\n",
             "evidence.html": page(header + "<p>" + escape(SCOPE) + "</p><section>" + paragraphs(evidence_text)
                                   + "</section><a href='index.html'>完整报告 / Full report</a>"),
             "evidence.json": dumps(snapshot), "card.json": dumps(card), "document.json": dumps(document),
             "card-preview.html": page("<header style='background:#225abc;color:white'><h1>" + escape(title)
-                                      + "</h1></header><section><p><strong>" + escape(lead) + "</strong></p><hr>"
-                                      + "<ul>" + "".join("<li>" + escape(text) + "</li>" for text in bullets) + "</ul>"
+                                      + "</h1></header><section><p><strong>" + element_html(summary_elements[0]) + "</strong></p><hr>"
+                                      + "<ul>" + "".join("<li>" + element_html(elements) + "</li>" for elements in summary_elements[1:]) + "</ul>"
                                       + "<a style='display:inline-block;border:1px solid #bbb;border-radius:6px;padding:8px 16px'"
                                       + " href='index.html'>打开 Daily Sync</a><p class='meta'>" + escape(signature) + "</p></section>")}
 
@@ -551,7 +641,7 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
             raise ValueError("source validation report_sha256 mismatch")
         parsed = VisibleReport()
         source_title, summary, body = parsed.extract(report_raw)
-        native_blocks, summary_paragraphs = parsed.semantic_blocks()
+        native_blocks, summary_paragraphs, summary_elements = parsed.semantic_blocks()
         coverage = {"covered_from": evidence["covered_from"], "covered_until": evidence["covered_until"]}
         selected = _evidence_summary(evidence)
         snapshot = export_data({"schema": "wa.report.v1", "origin": "external_daily_import",
@@ -560,6 +650,7 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
             "coverage": coverage, "title": source_title if title is None else title,
             "source_title": source_title, "summary": summary, "body": body,
             "native_blocks": native_blocks, "summary_paragraphs": summary_paragraphs,
+            "summary_elements": summary_elements,
             "scope": SCOPE, "tasks": [], "claims": [], "corrections": [], "evidence": selected})
         content = render_import(snapshot)
         # Re-read every input, including state, after extraction/rendering. Changed bytes,
