@@ -813,7 +813,7 @@ class DailyImportTests(Base):
             self.assertTrue(repeat["no_op"])
             self.assertEqual(len(transport.calls), count)
             self.write_bundle(HTML.replace("合成样本十个", "更正：合成样本八个"))
-            second_report = self.load(title="同一周期的修订预览")
+            second_report = self.load()
             second = publish(self.s, self.conf["publisher"], second_report["id"], confirm=True, transport=transport)
             self.assertEqual(second["status"], "completed")
             for key in ("identity", "document_id", "message_id"):
@@ -828,6 +828,25 @@ class DailyImportTests(Base):
             reconcile(self.s, self.conf["publisher"], second["publication_id"], transport=transport)
             self.assertTrue(all(m == "GET" or u.endswith("/tenant_access_token/internal")
                                 for m, u, _ in transport.calls[before:]))
+
+    def test_same_period_title_change_refuses_without_document_or_message_writes(self):
+        transport = FakeHTTP()
+        with patch.dict(os.environ, {"FEISHU_APP_ID": "fixture-app", "FEISHU_APP_SECRET": "fixture-secret",
+                                     "FEISHU_RECEIVE_ID": "fixture-receiver"}):
+            first_report = self.load()
+            snapshot_before = self.files(first_report)
+            first = publish(self.s, self.conf["publisher"], first_report["id"], confirm=True, transport=transport)
+            self.assertEqual(first["status"], "completed")
+            revised = self.load(title="同一周期的修订预览")
+            before = len(transport.calls)
+            refused = publish(self.s, self.conf["publisher"], revised["id"], confirm=True, transport=transport)
+            self.assertEqual(refused["status"], "failed")
+            self.assertIn("metadata title change", refused["error"])
+            self.assertIsNone(refused["pending"])
+            self.assertEqual(transport.calls[before:], [])
+            for key in ("identity", "document_id", "message_id", "block_ids", "document_payload_hash", "document_report_id"):
+                self.assertEqual(refused[key], first[key])
+            self.assertEqual(self.files(first_report), snapshot_before)
 
     def test_ambiguous_publish_never_retried_by_import(self):
         transport = FakeHTTP()
