@@ -197,7 +197,7 @@ send intent stores that same delivery context. Legacy frozen plans/intents witho
 delivery fields retain their original ordinary-send behavior. Completed/unknown
 old actions are not migrated or replayed.
 
-Trusted `inbound.group_ack_policy` accepts `thread` (default) or `none`, affecting
+Trusted `inbound.group_ack_policy` accepts `thread` (default), `none` or `reaction`, affecting
 groups only. `none` omits the separate acknowledgement and records
 `ack_skipped.reason=trusted_group_ack_policy_none`; it creates neither ack intent
 nor a fabricated receipt. The final still quotes the original user message once.
@@ -208,3 +208,29 @@ never rewritten when this preference changes. It is excluded from the authority
 settings hash so old frozen plans remain recoverable; all other configuration
 identity/authority checks remain in force. An already recorded ack skip remains
 skipped rather than being recreated after a later preference change.
+
+With `reaction`, a newly accepted group event freezes its `ack_mode` and trusted
+`ack_reaction` (`Get` by default; only `Get`, `OK`, `OnIt`) before classification.
+It first tries one bot reaction on the original user's message, for both quick
+answers and escalations; it sends no separate text/topic ack. The durable stream
+reader still only journals events: reaction work runs in the foreground processing
+loop before DS, so network calls do not block the event-reader thread. This is
+receipt acknowledgement, not a claim that investigation or execution is complete.
+Private-chat text acknowledgements retain their previous behavior.
+
+The independent intent uses exactly `inbound:KEY:ack-reaction`, pinning source,
+chat, emoji, bot identity and app. The shared [reaction CLI](messages.md#bot-reaction-acknowledgements)
+validates the source, adopts an existing app+emoji reaction or records POST intent
+before adding it, then verifies the same reaction ID by paginated GET. A failed or
+unknown reaction does not block DS, GPT or the final quote; there is no fallback
+text acknowledgement, automatic retry, removal or progress-reaction sequence.
+`inbound inspect` can perform GET-only inspection of its known shared action.
+Interrupted inbound intent with no shared action remains unresolved, without
+trying to create an action. Reaction failures never consume the answer's final
+request ID.
+
+Only new events carry reaction eligibility. Old received events lacking the new
+ack metadata receive no retrospective reaction; under the reaction policy they
+may produce only their final answer. Existing ack intents and frozen final plans
+remain unchanged. `ack_reaction` is also a presentation preference excluded from
+the authority hash; a frozen mode/emoji remains pinned when configuration changes.

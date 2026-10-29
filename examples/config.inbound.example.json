@@ -13,6 +13,7 @@
   "inbound": {
     "enabled": false,
     "group_ack_policy": "thread",
+    "ack_reaction": "Get",
     "expected_app_id": "cli_REPLACE_WITH_YOUR_APP",
     "owner_open_id": "ou_REPLACE_WITH_YOUR_OWN_OPEN_ID",
     "test_chat_id": "oc_REPLACE_WITH_APPROVED_TEST_CHAT",

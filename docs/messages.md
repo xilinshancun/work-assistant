@@ -140,6 +140,45 @@ sender and chat; `verification_scope` explicitly excludes URL click-through and
 visual layout. The immutable source retains the exact sent URL/style payload.
 A differing readback remains `verification_pending`, never a new POST.
 
+## Bot reaction acknowledgements
+
+`python3 -m work_assistant.reactions` provides only add/list/inspect for a known
+message, using the same official `publisher.transport=lark_cli` configuration,
+pinned app, isolated bot environment, Store and locks. It never logs in, exports
+credentials, changes profiles or removes reactions. Synthetic examples:
+
+```sh
+python3 -m work_assistant.reactions --config private/config.local.json add \
+  --request-id original-session:original-ack --chat-id oc_synthetic_chat \
+  --message-id om_synthetic_source --emoji Get --dry-run
+python3 -m work_assistant.reactions --config private/config.local.json add \
+  --request-id original-session:original-ack --chat-id oc_synthetic_chat \
+  --message-id om_synthetic_source --emoji Get --confirm
+python3 -m work_assistant.reactions --config private/config.local.json list \
+  --chat-id oc_synthetic_chat --message-id om_synthetic_source --emoji Get
+python3 -m work_assistant.reactions --config private/config.local.json inspect REACTION_ACTION_ID
+```
+
+The trusted emoji choice is restricted to `Get` (default), `OK`, `OnIt`. Request
+identity binds chat/source/emoji/bot/app; request and remote-source+emoji locks
+serialize writes across request IDs. Authentication, exact source GET (same chat,
+not deleted), and complete bounded paginated reaction-list preflight happen before
+POST intent. An existing reaction with `operator_type=app`, the pinned app ID and
+the exact emoji is adopted without POST. Other apps/users/emojis cannot verify it.
+New POST sends only `reaction_type.emoji_type`; no undocumented UUID/idempotency
+field or duplicate-POST guarantee is assumed. Its returned reaction ID, operator
+and emoji must match, then the same ID must appear in complete GET readback.
+
+Any exception after POST intent is unknown, including missing/malformed response,
+API rejection or readback timeout. Repeated add is a local no-op; replacing request
+IDs cannot bypass an unresolved target. `inspect` only GETs source/list: an observed
+matching reaction can resolve an unknown; not observed stays unknown, without an
+absence assertion or repeat POST. There is no automatic resolve/remove workflow.
+For an already completed/verified receipt, a later missing reaction or temporary
+GET failure preserves the historical verification. `last_readback.confirmed=false`
+and a separate observation describe the current unconfirmed readback; removal does
+not retroactively turn a verified addition into an unresolved write.
+
 ## Explicit user identity (optional)
 
 `send --identity user` supports text and display-only cards through the official

@@ -17,6 +17,7 @@ from .inbound_transport import Consumer, MAX_LINE
 from .lark_cli import LarkCLI
 from .messages import send as send_message, inspect as inspect_message
 from .message_cards import parse_card
+from . import reactions
 from .policy import authorize
 from .process import termination_guard
 from .store import Store
@@ -45,7 +46,7 @@ def ident(app,message):return 'inbound_'+digest([app,message])[:32]
 def settings_hash(settings):
     # This presentation preference affects only unfrozen ack decisions, not the
     # event's authority. Existing intents/final plans keep their frozen delivery.
-    return digest({key:value for key,value in settings.items() if key!='group_ack_policy'})
+    return digest({key:value for key,value in settings.items() if key not in {'group_ack_policy','ack_reaction'}})
 
 
 def validate(conf,store,enabled=False):
@@ -53,8 +54,10 @@ def validate(conf,store,enabled=False):
     if type(value) is not dict or type(value.get('enabled',False)) is not bool:
         raise ValueError('inbound.enabled must be a boolean')
     if enabled and value.get('enabled') is not True:raise ValueError('inbound disabled; explicitly configure before run')
-    if type(value.get('group_ack_policy','thread')) is not str or value.get('group_ack_policy','thread') not in ('thread','none'):
-        raise ValueError('inbound.group_ack_policy must be thread or none')
+    if type(value.get('group_ack_policy','thread')) is not str or value.get('group_ack_policy','thread') not in ('thread','none','reaction'):
+        raise ValueError('inbound.group_ack_policy must be thread, none or reaction')
+    if type(value.get('ack_reaction','Get')) is not str or value.get('ack_reaction','Get') not in reactions.EMOJIS:
+        raise ValueError('inbound.ack_reaction must be Get, OK or OnIt')
     required={'expected_app_id','owner_open_id','test_chat_id','project_id','gpt_provider'}
     if not required.issubset(value):raise ValueError('inbound requires app, owner, test chat, project and trusted provider')
     def identifier(name,prefix):
@@ -143,11 +146,12 @@ def triage(value):
 
 
 class Engine:
-    def __init__(self,store,conf,providers=None,paseo=None,worktrees=None,sender=None,bot_id=None):
+    def __init__(self,store,conf,providers=None,paseo=None,worktrees=None,sender=None,bot_id=None,reactor=None):
         self.store=store;self.conf=conf;self.settings=validate(conf,store);self.bot_id=bot_id
         dshconf=copy.deepcopy(conf);dshconf['providers']['dsh']['timeout']=min(20,dshconf['providers']['dsh']['timeout'])
         self.providers=providers or Providers(dshconf);self.paseo=paseo or Paseo(self.settings)
         self.worktrees=worktrees or Worktrees();self.sender=sender or self._send
+        self.reactor=reactor or self._react
 
     def save(self,record,**changes):
         data=dict(record['data'],**changes,updated=now());self.store.update_record(record['id'],data)
@@ -168,7 +172,7 @@ class Engine:
                   'settings_hash':settings_hash(self.settings),'authority':{'action':'read','project_id':self.settings['project_id']}}
             if not reason:
                 artifact=self.store.root/'inbound'/key/'user.txt';private_write(artifact,text.encode())
-                data.update(source_artifact=str(artifact),text_hash=digest(text.encode()))
+                data.update(source_artifact=str(artifact),text_hash=digest(text.encode()),ack_eligible=True)
             record=self.store.record(KIND,data,project_id=self.settings['project_id'],ident=key)
         return record
 
@@ -178,6 +182,35 @@ class Engine:
         raw=path.read_bytes()
         if digest(raw)!=record['data']['text_hash']:raise ProtocolError('private request hash changed')
         return raw.decode('utf-8')
+
+    def _react(self,request,chat,message,emoji):
+        return reactions.add(self.store,self.conf['publisher'],request,chat,message,emoji,confirm=True)
+
+    def acknowledge(self,record):
+        """One independent, best-effort acknowledgement before any classifier call."""
+        data=record['data']
+        if not data.get('ack_eligible') or data.get('ack_intent') or data.get('final_intent') or data.get('final_text_hash'):
+            return record  # Never backfill old events or alter frozen deliveries.
+        if not data.get('ack_mode'):
+            mode=self.settings.get('group_ack_policy','thread') if data['event']['chat_type']=='group' else 'private_text'
+            record=self.save(record,ack_mode=mode,ack_emoji=self.settings.get('ack_reaction','Get') if mode=='reaction' else None)
+            data=record['data']
+        if data['ack_mode']!='reaction' or data.get('ack_reaction_intent'):
+            return record
+        request='inbound:'+record['id']+':ack-reaction'
+        event=data['event']
+        intent={'request_id':request,'chat_id':event['chat_id'],'message_id':event['message_id'],
+                'emoji_type':data['ack_emoji'],'identity':'bot','expected_app_id':data['app_id'],'at':now()}
+        record=self.save(record,ack_reaction_intent=intent)
+        try:
+            receipt=self.reactor(request,event['chat_id'],event['message_id'],data['ack_emoji'])
+            if type(receipt) is not dict:raise ProtocolError('invalid reaction receipt')
+        except BaseException as exc:
+            record=self.save(record,ack_reaction_receipt={'status':'outcome_unknown','verification_status':'unresolved',
+                'action_id':reactions.action_id(request),'error':'reaction_adapter_interrupted; inspect only'})
+            if isinstance(exc,(KeyboardInterrupt,SystemExit)):raise
+            return record
+        return self.save(record,ack_reaction_receipt=receipt)
 
     def _send(self,request,chat,path):
         _,key,kind=request.split(':')
@@ -271,10 +304,11 @@ class Engine:
         others=[r for r in self.records() if r['id']!=record['id'] and r['data'].get('cwd') and
                 (r['data']['status'] in ACTIVE or r['data'].get('gpt_unresolved'))]
         if others:return self.final(record,'有深度任务进行中，请稍后。','needs_user')
+        ack_mode=record['data'].get('ack_mode',self.settings.get('group_ack_policy','thread'))
         if (record['data']['event']['chat_type']=='group' and not record['data'].get('ack_intent')
-                and (record['data'].get('ack_skipped') or self.settings.get('group_ack_policy','thread')=='none')):
+                and (record['data'].get('ack_skipped') or ack_mode in ('none','reaction'))):
             if not record['data'].get('ack_skipped'):
-                record=self.save(record,ack_skipped={'reason':'trusted_group_ack_policy_none','policy':'none','at':now()})
+                record=self.save(record,ack_skipped={'reason':'trusted_group_ack_policy_'+ack_mode,'policy':ack_mode,'at':now()})
         else:
             record=self.reply(record,'ack','收到，正在处理；完成后会回复这条消息。')
         data=record['data'];project=self.store.project(self.settings['project_id'])
@@ -348,6 +382,7 @@ class Engine:
         if data.get('settings_hash')!=settings_hash(self.settings):raise ProtocolError('inbound config changed; inspect original authorization')
         if data.get('diagnostic_final'):return record
         status=data['status']
+        if status=='received':record=self.acknowledge(record)
         if status in {'received','triaging'}:record=self.classify(record);status=record['data']['status']
         if status=='escalating':return self.dispatch(record)
         if status=='preparing_workspace':return self.save(record,status='needs_user',error='workspace_preparation_interrupted; no automatic recreation')
@@ -387,6 +422,10 @@ class Engine:
                 receipt=data.get(kind+'_receipt',{})
                 if receipt.get('action_id'):
                     result[kind+'_verification']=inspect_message(self.store,self.conf['publisher'],receipt['action_id'])
+        if self.reactor==self._react and data.get('ack_reaction_intent'):
+            action=reactions.action_id(data['ack_reaction_intent']['request_id'])
+            result['reaction_verification']=reactions.inspect(self.store,self.conf['publisher'],action) if reactions._find(self.store,action) else {
+                'status':'outcome_unknown','error':'no shared reaction action recorded; no automatic retry'}
         return result
 
     def processing_error(self,record,exc):
