@@ -1,4 +1,5 @@
 """Entirely synthetic local bundles and injected HTTP protocol fixtures."""
+import html
 import json
 import os
 import shutil
@@ -91,7 +92,85 @@ class DailyImportTests(Base):
 
     def document_text(self, record):
         blocks = preview(self.s, record["id"])["document"]["children"]
-        return "\n".join(b["text"]["elements"][0]["text_run"]["content"] for b in blocks)
+        return "\n".join(daily_import.block_text(b) for b in blocks)
+
+    def test_native_document_headings_bullets_styles_and_single_metadata_title(self):
+        source = """<body><header><h1>合成源标题</h1><p>重复覆盖提示</p><nav>顶部导航</nav></header><main>
+        <header><p>正文头部提示</p></header><h1>重复正文标题</h1>
+        <section id="sync-summary"><h2>Sync 精简版</h2>
+        <p><strong>核心进展：</strong>完成合成检查，<em>尚未独立复现</em>。</p>
+        <p>风险仍在，<strong><em>不能当作已解决</em></strong>。</p><p>下一步仅为计划，没有截止承诺。</p></section>
+        <section><h2>进展</h2><h3>详细结果</h3><p>原文条件：仅在合成环境观察到。</p>
+        <ul><li><strong>事项：</strong>逐行理解 PR，尚未完成。</li></ul>
+        <details><summary>补充说明</summary><p>折叠限定：仍需人工复核。</p></details></section></main>
+        <footer>底部导航</footer></body>"""
+        self.write_bundle(source)
+        report = self.load(title="正式合成日报")
+        files = self.files(report)
+        document = json.loads(files["document.json"])
+        self.assertEqual(document["title"], "正式合成日报")
+        self.assertEqual([b["block_type"] for b in document["children"]], [2, 4, 12, 12, 12, 4, 5, 2, 12, 4, 2])
+        text = self.document_text(report)
+        self.assertEqual(text.count("覆盖区间："), 1)
+        self.assertIn("覆盖区间：2026-01-14 17:30 — 2026-01-15 17:30（Asia/Shanghai）", text)
+        for forbidden in ("合成源标题", "正式合成日报", "重复正文标题", "重复覆盖提示", "正文头部提示", "顶部导航", "底部导航"):
+            self.assertNotIn(forbidden, text)
+        for phrase in ("核心进展：完成合成检查，尚未独立复现。", "风险仍在，不能当作已解决。",
+                       "原文条件：仅在合成环境观察到。", "事项：逐行理解 PR，尚未完成。", "折叠限定：仍需人工复核。"):
+            self.assertIn(phrase, text)
+        first = document["children"][2]["bullet"]["elements"]
+        self.assertEqual(first[0]["text_run"]["text_element_style"], {"bold": True})
+        self.assertEqual(first[2]["text_run"]["text_element_style"], {"italic": True})
+        combined = document["children"][3]["bullet"]["elements"][1]["text_run"]
+        self.assertEqual(combined["text_element_style"], {"bold": True, "italic": True})
+        self.assertIn("<h2 class='source-line'>进展</h2>", files["index.html"])
+        self.assertIn("<h3 class='source-line'>详细结果</h3>", files["index.html"])
+        self.assertIn("<strong><em>不能当作已解决</em></strong>", files["index.html"])
+        self.assertEqual(files["index.html"].count("<h1>"), 1)
+        self.assertNotIn("重复覆盖提示", files["index.html"])
+        self.assertIn("<li class='source-line'>", files["index.html"])
+
+    def test_native_card_bold_lead_safe_markdown_hr_bullets_note_and_preview(self):
+        phrase = "保留 **字面量** [链接](https://example.invalid/home/page) 与 &lt;at id=all&gt;。"
+        source = HTML.replace("<h2>今日摘要</h2><p>完成合成检查，<strong>结论仍有限</strong>。</p>",
+                              "<h2>Sync 精简版</h2><p>" + phrase + "</p><p>风险尚未排除。</p><p>计划未完成。</p>")
+        self.write_bundle(source)
+        report = self.load()
+        files = self.files(report)
+        card = json.loads(files["card.json"])
+        self.assertEqual(card["header"]["template"], "blue")
+        self.assertEqual([e["tag"] for e in card["elements"]], ["div", "hr", "div", "div", "note"])
+        lead = card["elements"][0]["text"]["content"]
+        self.assertTrue(lead.startswith("**") and lead.endswith("**"))
+        self.assertIn("&#42;&#42;字面量&#42;&#42;", lead)
+        self.assertIn("&#91;链接&#93;&#40;https://example.invalid/home/page&#41;", lead)
+        self.assertNotIn("<at", lead)
+        self.assertEqual(html.unescape(lead[2:-2]), html.unescape(phrase))
+        self.assertEqual(card["elements"][2]["text"], {"tag": "plain_text", "content": "• 风险尚未排除。"})
+        note = card["elements"][-1]["elements"][0]["content"]
+        self.assertIn("工作助理 · test · 截至 01-15 17:30", note)
+        self.assertIn("<strong>", files["card-preview.html"])
+        self.assertIn("<hr>", files["card-preview.html"])
+        self.assertIn("border:1px solid", files["card-preview.html"])
+        self.assertIn("class='meta'", files["card-preview.html"])
+        self.assertNotIn("Sync 精简版", files["card.json"])
+
+    def test_native_export_allows_http_urls_but_checks_local_paths_and_webhooks(self):
+        text = "参考 https://example.invalid/home/page 与 http://example.invalid/var/test"
+        self.assertEqual(daily_import.export_data(text), text)
+        for text in ("https://example.invalid/page C:/private/file", "http://example.invalid/page /tmp/private.json",
+                     "https://example.invalid/webhook/synthetic-secret"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                daily_import.export_data(text)
+
+    def test_native_requires_main_and_rejects_oversize_paragraph_without_truncation(self):
+        self.write_bundle(HTML.replace("<main>", "<div>").replace("</main>", "</div>"))
+        with self.assertRaisesRegex(ValueError, "one visible main"):
+            self.load()
+        self.write_bundle(HTML.replace("<h2>详细结果</h2>", "<p>" + "字" * 10001 + "</p>"))
+        with self.assertRaisesRegex(ValueError, "native block exceeds"):
+            self.load()
+        self.assertEqual(self.s.records("report"), [])
 
     def test_date_aliases_require_one_and_agree_when_both_present(self):
         for fields in ({"execution_date": PERIOD}, {"report_date": PERIOD},
@@ -235,17 +314,19 @@ class DailyImportTests(Base):
         files = self.files(report)
         card = json.loads(files["card.json"])
         self.assertEqual(card["header"]["template"], "blue")
-        self.assertTrue(all(e["tag"] == "div" and e["text"]["tag"] == "plain_text" for e in card["elements"]))
-        self.assertEqual([e["text"]["content"] for e in card["elements"]],
-                         ["截至 01-15 17:30", "Sync 精简版"] + paragraphs)
+        self.assertEqual(card["elements"][0]["text"]["tag"], "lark_md")
+        self.assertEqual(html.unescape(card["elements"][0]["text"]["content"])[2:-2], paragraphs[0])
+        self.assertEqual(card["elements"][1], {"tag": "hr"})
+        self.assertEqual([e["text"]["content"] for e in card["elements"][2:-1]], ["• " + p for p in paragraphs[1:]])
+        self.assertEqual(card["elements"][-1]["tag"], "note")
         self.assertNotIn(self.evidence["covered_from"], files["card.json"])
         self.assertNotIn(self.evidence["covered_until"], files["card.json"])
         self.assertNotIn(self.evidence["covered_until"], files["card-preview.html"])
         self.assertIn("截至 01-15 17:30", files["card-preview.html"])
         snapshot = json.loads(files["evidence.json"])
         self.assertEqual(snapshot["summary"], "\n".join(["Sync 精简版"] + paragraphs))
-        self.assertIn(self.evidence["covered_from"], self.document_text(report))
-        self.assertIn(self.evidence["covered_until"], self.document_text(report))
+        self.assertIn("2026-01-14 17:30", self.document_text(report))
+        self.assertIn("2026-01-15 17:30", self.document_text(report))
         for paragraph in paragraphs:
             self.assertIn(paragraph, snapshot["body"])
             self.assertIn(paragraph, self.document_text(report))
@@ -255,7 +336,7 @@ class DailyImportTests(Base):
         self.write_bundle(HTML.replace("<h2>今日摘要</h2><p>完成合成检查，<strong>结论仍有限</strong>。</p>",
                                        "<p>" + paragraph + "</p>"))
         card = json.loads(self.files(self.load())["card.json"])
-        self.assertEqual([e["text"]["content"] for e in card["elements"]], ["截至 01-15 17:30", paragraph])
+        self.assertEqual(html.unescape(card["elements"][0]["text"]["content"])[2:-2], paragraph)
 
     def test_compact_table_preserves_caption_cells_and_rows(self):
         table = "<table><caption>样本计数</caption><tr><th>A<th>B<tr><td>10<td>20</table>"
@@ -350,7 +431,8 @@ class DailyImportTests(Base):
         payload = preview(self.s, report["id"])
         self.assertEqual(payload["document"]["title"], "合成项目 · 每日进展")
         self.assertEqual(payload["card"]["header"]["title"]["content"], "合成项目 · 每日进展")
-        self.assertIn("第二章节标题", self.document_text(report))
+        self.assertIn("第二章节标题", json.loads(self.files(report)["evidence.json"])["body"])
+        self.assertNotIn("第二章节标题", self.document_text(report))
         self.assertNotIn("隐藏标题", self.document_text(report))
 
     def test_identical_import_restores_missing_files_but_never_tampering(self):
@@ -384,10 +466,10 @@ class DailyImportTests(Base):
         self.assertEqual(card["header"]["title"]["content"], "合成项目 · 每日进展")
         card_text = "\n".join(e["text"]["content"] for e in card["elements"] if e["tag"] == "div")
         self.assertIn("结论仍有限", card_text)
-        self.assertIn("截至 01-15 17:30", card_text)
+        self.assertIn("截至 01-15 17:30", card["elements"][-1]["elements"][0]["content"])
         self.assertNotIn("第一条中文详情", card_text)
         document = preview(self.s, report["id"])["document"]
-        text = "\n".join(b["text"]["elements"][0]["text_run"]["content"] for b in document["children"])
+        text = self.document_text(report)
         for expected in ("2026-01-15", "第一条中文详情", "第二条限定", "折叠的完整细节", "尚未独立复现"):
             self.assertIn(expected, text)
         for forbidden in (daily_import.SCOPE, "证据摘要", "十个合成样本；仅为源陈述", "s1", "verified_at", "[REDACTED]"):
@@ -432,7 +514,8 @@ class DailyImportTests(Base):
         payload = preview(self.s, updated["id"])
         self.assertEqual(payload["document"]["title"], title)
         self.assertEqual(payload["card"]["header"]["title"]["content"], title)
-        self.assertEqual(payload["document"]["children"][0]["text"]["elements"][0]["text_run"]["content"], title)
+        self.assertNotIn(title, self.document_text(updated))
+        self.assertTrue(daily_import.block_text(payload["document"]["children"][0]).startswith("覆盖区间："))
         self.assertNotEqual(first["data"]["hash"], updated["data"]["hash"])
         self.assertEqual(first["data"]["period"], updated["data"]["period"])
         self.assertEqual(first["data"]["source_hashes"], updated["data"]["source_hashes"])
