@@ -316,7 +316,7 @@ class LarkCLITests(Base):
     def test_member_confirmation_rejects_wrong_types_identity_and_missing_audit(self):
         with patch.dict(os.environ, {"WA_APPROVED_MEMBER": "ou_fixture"}):
             result = self.unknown_share()
-            for value in (False, 1, "true", None):
+            for value in (0, 1, "true", None):
                 with self.subTest(value=value), self.assertRaises(ValueError):
                     reconcile(self.s, self.settings, result["publication_id"], "retry_authorized", "manual check",
                               {"document_member_granted": value})

@@ -167,6 +167,58 @@ class FeishuTests(Base):
         card = json.loads(self.server.calls[first_card][2]["content"])
         self.assertEqual(card["elements"][-1]["actions"][0]["url"], "https://www.feishu.cn/docx/doc-synthetic")
 
+    def test_unknown_share_verified_absent_requires_retry_and_sends_only_once(self):
+        self.settings["document_member_env"] = "WA_MEMBER"
+        def disconnected_share(method, url, body, headers):
+            if "/drive/v1/permissions/" in url:
+                raise AmbiguousError("synthetic connection lost before server receipt")
+            return http(method, url, body, headers)
+        def shares():
+            return [c for c in self.server.calls if c[0] == "POST" and "/drive/v1/permissions/" in c[1]]
+        with patch.dict(os.environ, {"WA_MEMBER": "ou_fixture"}):
+            unknown = self.send(transport=disconnected_share)
+            self.assertEqual(unknown["status"], "outcome_unknown")
+            self.assertEqual(unknown["pending"]["stage"], "share_document_member")
+            self.assertEqual(shares(), [])
+            ident = unknown["publication_id"]
+            for resolution, value in [("completed", False), ("cancelled", False),
+                                      ("retry_authorized", 0), ("retry_authorized", None)]:
+                with self.subTest(resolution=resolution, value=value), self.assertRaises(ValueError):
+                    reconcile(self.s, self.settings, ident, resolution, "operator checked document permissions",
+                              {"document_member_granted": value}, base=self.server.base)
+            for reason, remote in [("", {"document_member_granted": False}),
+                                   ("operator checked", {"document_member_granted": False, "document_id": "different-doc"})]:
+                with self.assertRaises(ValueError):
+                    reconcile(self.s, self.settings, ident, "retry_authorized", reason, remote, base=self.server.base)
+            with patch.dict(os.environ, {"WA_MEMBER": "ou_other"}), self.assertRaises(ValueError):
+                reconcile(self.s, self.settings, ident, "retry_authorized", "operator checked",
+                          {"document_member_granted": False}, base=self.server.base)
+            with self.assertRaises(ValueError):
+                reconcile(self.s, dict(self.settings, document_member_perm="full_access"), ident,
+                          "retry_authorized", "operator checked", {"document_member_granted": False}, base=self.server.base)
+            absent = reconcile(self.s, self.settings, ident, "retry_authorized",
+                "operator verified the configured user has no document permission",
+                {"document_member_granted": False}, base=self.server.base)["publication"]
+            self.assertEqual(absent["document_member_status"], "operator_verified_absent")
+            self.assertEqual(absent["document_member_verification"], "operator_confirmed_absent")
+            self.assertNotIn("document_member_fingerprint", absent)
+            self.assertIsNone(absent["pending"])
+            with self.assertRaises(ValueError):
+                self.send()
+            self.assertEqual(shares(), [])
+            done = self.send(retry=True)
+            self.assertEqual(done["status"], "completed")
+            self.assertEqual(done["document_member_status"], "granted")
+            self.assertEqual(done["document_member_verification"], "api_acknowledged")
+            self.assertEqual(len(shares()), 1)
+            self.assertTrue(self.send()["no_op"])
+            self.task()
+            self.report = generate_report(self.s, self.p["id"], "2026-01-15")
+            self.assertEqual(self.send()["status"], "completed")
+            self.assertEqual(len(shares()), 1)
+            event = next(e for e in self.s.records("event") if e["data"].get("action") == "publication_resolution")
+            self.assertIs(event["data"]["remote_ids"]["document_member_granted"], False)
+
     def test_timeout_unknown_inspect_then_operator_resolution(self):
         self.server.delay_card = True
         def short_transport(*args):

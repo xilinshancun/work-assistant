@@ -229,7 +229,8 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
                     if data.get("document_member_fingerprint") != fingerprint:
                         effect("share_document_member", "POST", "/drive/v1/permissions/%s/members?type=docx&need_notification=false" % doc,
                                {"member_type": "openid", "member_id": member, "perm": perm, "type": "user"})
-                        data.update(document_member_fingerprint=fingerprint, document_member_status="granted")
+                        data.update(document_member_fingerprint=fingerprint, document_member_status="granted",
+                                    document_member_verification="api_acknowledged")
                         checkpoint()
                 children = payload["document"]["children"]
                 for index, block in enumerate(children):
@@ -328,22 +329,34 @@ def reconcile(store, settings, ident, resolution=None, reason=None, remote_ids=N
                     raise ValueError("block_ids must be string list")
                 confirmation = remote_ids.get("document_member_granted")
                 if "document_member_granted" in remote_ids:
-                    if confirmation is not True:
-                        raise ValueError("document_member_granted must be exactly true after manual verification")
+                    if type(confirmation) is not bool:
+                        raise ValueError("document_member_granted must be an exact JSON boolean after manual verification")
+                    if confirmation is False and (resolution != "retry_authorized" or not sharing_unknown):
+                        raise ValueError("confirming absent sharing requires an unknown share and retry_authorized resolution")
                     member = client.document_member()
                     if not member or client.destination() != data["destination"]:
                         raise ValueError("document member confirmation requires the original explicit member and destination")
                     document_id = remote_ids.get("document_id", data.get("document_id"))
                     if not document_id or (data.get("document_id") and document_id != data["document_id"]):
                         raise ValueError("document member confirmation must refer to the original known document")
+                    if confirmation is False and not data.get("document_id"):
+                        raise ValueError("confirming absent sharing requires the original known document ID")
                     fingerprint = digest([member, client.settings.get("document_member_perm", "edit")])
                     if data.get("document_member_fingerprint") not in (None, fingerprint):
                         raise ValueError("document member confirmation differs from recorded member")
-                    data.update(document_member_fingerprint=fingerprint, document_member_status="granted",
-                                document_member_verification="operator_confirmed")
+                    if confirmation:
+                        data.update(document_member_fingerprint=fingerprint, document_member_status="granted",
+                                    document_member_verification="operator_confirmed")
+                    else:
+                        data.pop("document_member_fingerprint", None)
+                        data.update(document_member_status="operator_verified_absent",
+                                    document_member_verification="operator_confirmed_absent")
                 data.update({key: value for key, value in remote_ids.items() if key != "document_member_granted"})
-            if sharing_unknown and resolution in {"completed", "retry_authorized"} and data.get("document_member_status") != "granted":
+            if (sharing_unknown and resolution in {"completed", "retry_authorized"} and
+                    data.get("document_member_status") not in {"granted", "operator_verified_absent"}):
                 raise ValueError("unknown document sharing requires explicit document_member_granted confirmation before continuing")
+            if resolution == "completed" and data.get("document_member_status") == "operator_verified_absent":
+                raise ValueError("absent document sharing must be retried or confirmed granted before completion")
             data.update(status=resolution, resolution_reason=reason, pending=None)
             with store.transaction():
                 store.update_record(ident, data)
