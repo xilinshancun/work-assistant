@@ -1,6 +1,7 @@
 """Feishu native card/docx publication with durable per-request checkpoints."""
 import json
 import os
+import re
 import socket
 import time
 import urllib.error
@@ -12,6 +13,16 @@ from .reports import load_report
 from .util import dumps, digest, redact
 
 BASE = "https://open.feishu.cn/open-apis"
+
+
+def document_settings(settings):
+    member_env = settings.get("document_member_env")
+    if member_env is not None and (type(member_env) is not str or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", member_env)):
+        raise ValueError("document_member_env must be an environment variable name")
+    if settings.get("document_member_perm", "edit") not in {"edit", "full_access"}:
+        raise ValueError("document_member_perm must be edit or full_access")
+    if settings.get("mode") == "webhook" and member_env:
+        raise ValueError("document sharing requires app mode")
 
 
 class APIError(ValueError):
@@ -46,7 +57,8 @@ def http(method, url, body=None, headers=None, timeout=20):
 
 class Feishu:
     def __init__(self, settings, transport=http, base=BASE):
-        self.settings, self.transport, self.base = settings, transport, base.rstrip("/")
+        self.settings, self.transport, self.base = dict(settings), transport, base.rstrip("/")
+        document_settings(self.settings)
         self.token = None
         self.last_request = 0.0
 
@@ -69,7 +81,22 @@ class Feishu:
         kind = self.settings["receive_id_type"]
         if kind not in {"chat_id", "open_id", "user_id", "union_id", "email"}:
             raise APIError("invalid receive_id_type")
-        return "app:" + digest([self.env("app_id_env"), kind, self.env("receive_id_env"), self.env("folder_token_env", False)])
+        identity = [self.app_id(), kind, self.env("receive_id_env"), self.env("folder_token_env", False)]
+        member = self.document_member()
+        if member:
+            identity += [member, self.settings.get("document_member_perm", "edit")]
+        return "app:" + digest(identity)
+
+    def document_member(self):
+        if not self.settings.get("document_member_env"):
+            return None
+        member = self.env("document_member_env")
+        if not re.fullmatch(r"ou_[A-Za-z0-9_-]+", member):
+            raise APIError("document member must be an explicitly configured user open_id")
+        return member
+
+    def app_id(self):
+        return self.env("app_id_env")
 
     def authenticate(self):
         if not self.token:
@@ -112,9 +139,23 @@ def preview(store, report_id):
             "card": card, "document": document, "note": "local preview only; webhook supports cards only; no network requests"}
 
 
-def publish(store, settings, report_id, confirm=False, transport=http, base=BASE, retry=False):
+def make_client(settings, transport=http, base=BASE, process=None):
+    kind = settings.get("transport", "http")
+    if kind == "lark_cli":
+        from .lark_cli import LarkCLI
+        return LarkCLI(settings, process=process)
+    if kind != "http":
+        raise APIError("invalid publisher transport")
+    return Feishu(settings, transport, base)
+
+
+def publish(store, settings, report_id, confirm=False, transport=http, base=BASE, retry=False, process=None):
     payload = preview(store, report_id)
-    client = Feishu(settings, transport, base)
+    report_hash = payload["hash"]
+    client = make_client(settings, transport, base, process)
+    if settings["mode"] == "app":
+        # Outbound card revision includes the runtime cloud-document button.
+        payload["hash"] = digest([payload["hash"], "feishu-docx-button-v1"])
     destination = client.destination()
     grants = settings.get("grants", [])
     if not confirm and (type(grants) is not list or any(type(g) is not str for g in grants) or destination not in grants):
@@ -133,7 +174,7 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
             raise ValueError("previous attempt requires explicit --retry after inspection")
         if prior and data["mode"] == "webhook" and data.get("hash") != payload["hash"] and data.get("status") == "completed":
             raise ValueError("webhook cannot update prior cards; use app mode for period updates")
-        data.update(status="publishing", hash=payload["hash"], report_id=report_id, pending=None)
+        data.update(status="publishing", hash=payload["hash"], report_hash=report_hash, report_id=report_id, pending=None)
         data.pop("error", None)
         data.pop("authentication_incomplete", None)
         publication = store.record("publication", data, project_id=report["project_id"])
@@ -176,6 +217,17 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
                         raise AmbiguousError("create document response missing ID")
                     checkpoint()
                 doc = urllib.parse.quote(data["document_id"], safe="")
+                member = client.document_member()
+                if member:
+                    perm = client.settings.get("document_member_perm", "edit")
+                    fingerprint = digest([member, perm])
+                    if data.get("document_member_fingerprint") not in (None, fingerprint):
+                        raise APIError("document member changed; refusing to share existing document")
+                    if data.get("document_member_fingerprint") != fingerprint:
+                        effect("share_document_member", "POST", "/drive/v1/permissions/%s/members?type=docx&need_notification=false" % doc,
+                               {"member_type": "openid", "member_id": member, "perm": perm, "type": "user"})
+                        data.update(document_member_fingerprint=fingerprint, document_member_status="granted")
+                        checkpoint()
                 children = payload["document"]["children"]
                 for index, block in enumerate(children):
                     if index < len(data["block_ids"]):
@@ -195,15 +247,21 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
                            {"start_index": len(children), "end_index": len(data["block_ids"])})
                     data["block_ids"] = data["block_ids"][:len(children)]
                     checkpoint()
+                card = json.loads(dumps(payload["card"]))
+                # Official lark-cli BuildResourceURL uses this standard Feishu
+                # origin, which redirects to the resource's tenant domain.
+                card["elements"].append({"tag": "action", "actions": [{"tag": "button", "type": "primary",
+                    "text": {"tag": "plain_text", "content": "打开 Daily Sync"},
+                    "url": "https://www.feishu.cn/docx/" + doc}]})
                 if data["message_id"]:
                     effect("update_card", "PATCH", "/im/v1/messages/" + urllib.parse.quote(data["message_id"], safe=""),
-                           {"content": dumps(payload["card"])})
+                           {"content": dumps(card)})
                 else:
                     # Feishu documents uuid deduplication for send-message, not for doc creation.
                     message_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, identity + payload["hash"]))
                     result = effect("create_card", "POST", "/im/v1/messages?receive_id_type=" + settings["receive_id_type"],
                                     {"receive_id": client.env("receive_id_env"), "msg_type": "interactive",
-                                     "content": dumps(payload["card"]), "uuid": message_uuid})
+                                     "content": dumps(card), "uuid": message_uuid})
                     data["message_id"] = result.get("message_id")
                     if not data["message_id"]:
                         raise AmbiguousError("send card response missing ID")
@@ -224,7 +282,7 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
         return dict(data, publication_id=publication["id"])
 
 
-def reconcile(store, settings, ident, resolution=None, reason=None, remote_ids=None, transport=http, base=BASE):
+def reconcile(store, settings, ident, resolution=None, reason=None, remote_ids=None, transport=http, base=BASE, process=None):
     record = store.get(ident)
     if record["kind"] != "publication":
         raise ValueError("expected publication ID")
@@ -236,7 +294,7 @@ def reconcile(store, settings, ident, resolution=None, reason=None, remote_ids=N
             with store.transaction():
                 store.update_record(ident, data)
                 store.record("event", {"action": "publication_interruption_observed", "publication": ident}, project_id=record["project_id"])
-        client = Feishu(settings, transport, base)
+        client = make_client(settings, transport, base, process)
         if (data.get("document_id") or data.get("message_id")) and client.destination() != data["destination"]:
             raise ValueError("reconcile destination differs from original publication")
         inspected = {}

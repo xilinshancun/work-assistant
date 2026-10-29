@@ -153,6 +153,20 @@ class FeishuTests(Base):
         self.assertEqual(self.server.count("POST", "/docx/v1/documents"), 1)
         self.assertEqual(len(self.s.records("report")), 1)
 
+    def test_http_member_grant_once_before_linked_card(self):
+        self.settings.update(document_member_env="WA_MEMBER")
+        with patch.dict(os.environ, {"WA_MEMBER": "ou_fixture"}):
+            self.assertEqual(self.send()["status"], "completed")
+            self.task()
+            self.report = generate_report(self.s, self.p["id"], "2026-01-15")
+            self.assertEqual(self.send()["status"], "completed")
+        shares = [i for i, (_, p, _) in enumerate(self.server.calls) if p.startswith("/drive/v1/permissions/")]
+        self.assertEqual(len(shares), 1)
+        first_card = next(i for i, (_, p, _) in enumerate(self.server.calls) if p.startswith("/im/v1/messages?"))
+        self.assertLess(shares[0], first_card)
+        card = json.loads(self.server.calls[first_card][2]["content"])
+        self.assertEqual(card["elements"][-1]["actions"][0]["url"], "https://www.feishu.cn/docx/doc-synthetic")
+
     def test_timeout_unknown_inspect_then_operator_resolution(self):
         self.server.delay_card = True
         def short_transport(*args):

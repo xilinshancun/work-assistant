@@ -44,9 +44,9 @@ class ProcessResult:
     diagnostics: list = field(default_factory=list)
 
 
-def subprocess_environment(env=None):
+def subprocess_environment(env=None, inherit_env=True):
     """Drop only corrupt Paseo metadata; fail before launch on other bad entries."""
-    overlay = os.environ.copy()
+    overlay = os.environ.copy() if inherit_env else {}
     overlay.update(env or {})
     diagnostics = []
     for key, value in list(overlay.items()):
@@ -66,11 +66,11 @@ def subprocess_environment(env=None):
     return overlay, diagnostics
 
 
-def execute(argv, prompt, cwd, env=None, timeout=600, pass_fds=(), max_bytes=2 * 1024 * 1024):
+def execute(argv, prompt, cwd, env=None, timeout=600, pass_fds=(), max_bytes=2 * 1024 * 1024, inherit_env=True):
     if type(argv) is not list or not argv or any(type(a) is not str for a in argv):
         raise ValueError("argv must be a string list")
     started = time.monotonic()
-    overlay, diagnostics = subprocess_environment(env)
+    overlay, diagnostics = subprocess_environment(env, inherit_env=inherit_env)
     kwargs = {"cwd": str(cwd), "env": overlay, "stdin": subprocess.PIPE,
               "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "shell": False}
     if os.name == "posix":

@@ -1,0 +1,20 @@
+{
+  "state_dir": ".wa",
+  "publisher": {
+    "mode": "app",
+    "transport": "lark_cli",
+    "cli_argv": [
+      "lark-cli"
+    ],
+    "cli_config_dir": "./private-lark-cli",
+    "cli_profile": "work-assistant",
+    "expected_app_id": "cli_REPLACE_WITH_YOUR_APP_ID",
+    "cli_timeout": 30,
+    "receive_id_env": "FEISHU_RECEIVE_ID",
+    "receive_id_type": "open_id",
+    "folder_token_env": "FEISHU_FOLDER_TOKEN",
+    "grants": [],
+    "document_member_env": "FEISHU_DOCUMENT_MEMBER",
+    "document_member_perm": "edit"
+  }
+}

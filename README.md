@@ -142,6 +142,35 @@ python3 -m work_assistant publish REPORT_ID --confirm
 
 官方 API 参考：[租户 token](https://open.feishu.cn/document/server-docs/authentication-management/access-token/tenant_access_token_internal)、[创建文档](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/create)、[创建块](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/create)、[更新块](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/patch)、[发送消息](https://open.feishu.cn/document/server-docs/im-v1/message/create)、[更新卡片](https://open.feishu.cn/document/server-docs/im-v1/message/patch)。
 
+### 可选：使用官方 lark-cli securestore
+
+默认 `publisher.transport=http` 继续使用上述环境变量凭证；Webhook 行为不变。若凭证已由[官方 lark-cli](https://github.com/larksuite/cli) 管理，可使用 `lark_cli` transport（仅应用模式），无需向 Work Assistant 提供 `FEISHU_APP_SECRET` 或 tenant token。CLI 由使用者另外安装，Python 包仍没有运行时依赖。
+
+从 [config.lark-cli.example.json](examples/config.lark-cli.example.json) 复制配置。先在自己租户按官方流程注册应用；如下隔离目录由 CLI 保存配置及 securestore 引用，请保留，不要提交到 Git：
+
+```sh
+mkdir -p private-lark-cli
+chmod 700 private-lark-cli
+LARKSUITE_CLI_CONFIG_DIR="$PWD/private-lark-cli" lark-cli config init --new --brand feishu --name work-assistant
+LARKSUITE_CLI_CONFIG_DIR="$PWD/private-lark-cli" lark-cli --profile work-assistant config show
+```
+
+把脱敏 `config show` 的 `appId` 填入 `expected_app_id`。将示例保存为 `config.local.json`，按自己的 CLI profile 设置 `cli_profile`（可以省略以选择该隔离配置的默认应用），设置目的地 `FEISHU_RECEIVE_ID`，必要时设置自己的 `FEISHU_FOLDER_TOKEN`。应用仍须拥有文档、消息及机器人权限，且能访问目标文档空间和接收人。接收人、群及文件夹属于使用者自己的租户；本项目不提供共享机器人。
+
+```sh
+python3 -m work_assistant doctor
+python3 -m work_assistant publish REPORT_ID --dry-run
+python3 -m work_assistant publish REPORT_ID --confirm
+```
+
+`cli_argv` 是可信本地命令数组，支持包装命令或 CLI 的绝对路径；`cli_config_dir` 和命令首项的相对路径均相对 Work Assistant 配置文件解析。`cli_timeout` 默认 30 秒，上限 300 秒。doctor 只调用本地脱敏 `config show`，显示 CLI 是否可用、App ID 是否匹配；不代表权限或真实发布已通过。每次实际发布先再次核对选中应用和 Feishu 品牌，再以 bot 身份只读探活，随后才写入待发送请求。CLI 子进程使用完整环境白名单，排除继承的 Lark/Feishu 凭证、授权代理、profile、其他宿主 workspace，以及普通代理变量，避免误用旧机器人。需代理的部署应先自行核验网络环境；不要把 token 放进 `cli_argv`。
+
+可选文档访问配置同时适用于 HTTP 和 lark_cli：`document_member_env` 引用一个用户明确批准的本人 open_id 环境变量（示例为 `FEISHU_DOCUMENT_MEMBER`），`document_member_perm` 默认 `edit`，也可在可信本地配置中选择 `full_access`。未配置 `document_member_env` 默认不分享；不需要分享时请删除示例中的该字段。配置后必须提供有效的 `ou_…` 用户 ID；不会给群或公开链接授权。创建文档后通过 `docs:permission.member:create` 权限添加此成员，关闭通知，并在发卡片前保存授权 checkpoint；同一成员和权限不会重复 grant。变更成员或权限会使用新的发布身份和文档，不会把旧文档静默分享给新成员，也不会自动撤回旧授权。
+
+应用模式发送的卡片自动增加“打开 Daily Sync”原生按钮，指向 `https://www.feishu.cn/docx/{document_id}`。此标准入口采用[官方 CLI 的资源 URL 规则](https://github.com/larksuite/cli/blob/main/shortcuts/common/resource_url.go)，由飞书跳转至文档所属租户；打开后仍需具备文档访问权限。本地报告快照保持不变；Webhook 只有本地文档，不添加云文档按钮。
+
+两个 transport 共用发布和 reconcile 状态机。CLI query 通过 `--params` 传入，JSON body 通过标准输入；原始 CLI 输出和凭证不会进入报告或错误记录。明确的认证、输入、权限拒绝记为 failed；写请求超时、进程中断、5xx 或损坏输出保留 unknown，禁止自动补发。认证探活失败发生在发布写入之前，可检查后显式 `--retry`。同内容仍无请求，变化内容更新已知文档和消息；换 transport 时应用与目的地必须保持一致。离线 FakeCLI 覆盖此协议和故障流程，不代表真实租户验收；live 权限和产物由使用者另行检查。
+
 ## 未知结果与恢复
 
 ```sh

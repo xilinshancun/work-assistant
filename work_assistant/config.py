@@ -11,7 +11,7 @@ DEFAULT = {
         "dsh": {"argv": ["dsh"], "env": {}, "timeout": 25, "patches": []},
         "codex": {"argv": ["codex"], "env": {}, "timeout": 600, "planner_effort": "low", "effort": "medium"},
         "claude_code": {"argv": ["claude"], "env": {}, "timeout": 600}},
-    "publisher": {"mode": "app", "app_id_env": "FEISHU_APP_ID", "app_secret_env": "FEISHU_APP_SECRET",
+    "publisher": {"mode": "app", "transport": "http", "app_id_env": "FEISHU_APP_ID", "app_secret_env": "FEISHU_APP_SECRET",
                   "receive_id_env": "FEISHU_RECEIVE_ID", "receive_id_type": "chat_id", "webhook_env": "FEISHU_WEBHOOK",
                   "folder_token_env": "FEISHU_FOLDER_TOKEN", "grants": []},
     "ingest_paths": []}
@@ -63,6 +63,8 @@ def load(path="config.local.json"):
         for field in ("effort", "planner_effort"):
             if field in conf and conf[field] not in {"low", "medium", "high", "xhigh"}:
                 raise ValueError("invalid effort")
+    from .lark_cli import validate
+    validate(data["publisher"], path.parent)
     return data
 
 
@@ -109,6 +111,10 @@ def doctor(conf, process=None):
                         "authentication": "not tested", "capabilities": capabilities,
                         "diagnostic": mcp_error or ("available; authentication untested" if found else missing[name])}
     pub = conf["publisher"]
+    if pub.get("transport", "http") == "lark_cli":
+        from .lark_cli import LarkCLI
+        result["feishu"] = LarkCLI(pub, process=process).diagnose()
+        return result
     result["feishu"] = {"mode": pub["mode"], "configured": all(os.environ.get(pub[k]) for k in
         (("webhook_env",) if pub["mode"] == "webhook" else ("app_id_env", "app_secret_env", "receive_id_env"))),
         "live_tested": False}

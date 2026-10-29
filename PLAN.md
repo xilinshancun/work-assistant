@@ -101,6 +101,24 @@ All live sending must be explicitly requested (`--confirm`, or an exact configur
 
 ## Tests and acceptance
 
+Optional official CLI transport: `publisher.transport=lark_cli` supports app mode
+alongside the default HTTP adapter. Trusted local config pins `cli_argv`,
+`cli_config_dir`, optional `cli_profile`, and `expected_app_id`. Config-relative
+paths resolve before use. The adapter calls masked `config show`, verifies App ID
+and Feishu brand, then probes bot info before recording any mutation intent.
+Credentials remain in the official CLI securestore. Each API process receives a
+complete allowlisted OS environment, explicit isolated config directory and bot
+identity; ambient credentials/profiles/workspace/auth proxies are excluded.
+Optional explicit document-member sharing uses an approved user open_id env ref,
+a checkpointed permission-create effect and member/permission destination identity;
+no group or public sharing. The official CLI standard
+`https://www.feishu.cn/docx/{id}` URL adds a native button to the outbound card
+copy without modifying report snapshots.
+Strict success envelopes and definite typed rejections are distinguished from
+ambiguous outcomes. Existing per-stage checkpoints, no-op, pacing, authorization
+and read-only reconciliation apply unchanged. Doctor checks selected local config
+without API calls. Offline FakeCLI tests are protocol fixtures, not live proof.
+
 - Entire unittest suite offline, Python 3.9 and 3.12.
 - Strict route validation: missing/unknown keys, JSON fence, NaN, boolean confidence, wrong task ID, invalid executor, injected grants; route tool invocation/timeout/error escalates once; GPT failure blocks; explicit write cannot shrink to read and report success.
 - Provider fixture parsers validate actual DSH, CC and Codex event shapes, failure with exit=0, permission denial, truncated streams, no final, killed processes and subprocess argv safety.
