@@ -19,6 +19,14 @@ from work_assistant.runner import run_task
 from work_assistant.util import dumps
 
 
+def patch_loopback_environment(case):
+    """Fixture-local bypass only; keep caller proxies and restore on cleanup."""
+    environment = patch.dict(os.environ, {"NO_PROXY": "localhost,127.0.0.1,::1",
+                                         "no_proxy": "localhost,127.0.0.1,::1"})
+    environment.start()
+    case.addCleanup(environment.stop)
+
+
 def events(*items):
     return "\n".join(dumps(item) for item in items)
 
@@ -51,6 +59,7 @@ class FakeProviders:
 
 class Base(unittest.TestCase):
     def setUp(self):
+        patch_loopback_environment(self)
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.conf = load(self.root / "config.json")
@@ -72,6 +81,22 @@ class Base(unittest.TestCase):
 
 
 class ParserTests(unittest.TestCase):
+    def test_loopback_fixture_bypass_restores_environment_without_replacing_proxies(self):
+        with patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:9", "http_proxy": "http://127.0.0.1:9"}):
+            os.environ.pop("NO_PROXY", None)
+            os.environ.pop("no_proxy", None)
+            case = unittest.TestCase()
+            try:
+                patch_loopback_environment(case)
+                self.assertEqual(os.environ["NO_PROXY"], "localhost,127.0.0.1,::1")
+                self.assertEqual(os.environ["no_proxy"], os.environ["NO_PROXY"])
+                self.assertEqual(os.environ["HTTP_PROXY"], "http://127.0.0.1:9")
+                self.assertEqual(os.environ["http_proxy"], "http://127.0.0.1:9")
+            finally:
+                case.doCleanups()
+            self.assertNotIn("NO_PROXY", os.environ)
+            self.assertNotIn("no_proxy", os.environ)
+
     def test_dsh_terminal_and_tools(self):
         # Synthetic projection derived from installed 0.2.1-rc.3 source; not live success.
         good = events({"type": "session", "sessionId": "dsh1"}, {"type": "text", "text": "hello"},

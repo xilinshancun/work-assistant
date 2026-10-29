@@ -19,6 +19,7 @@ from work_assistant.feishu import APIError, AmbiguousError
 from work_assistant.process import ProcessResult
 from work_assistant.store import Busy, Store
 from work_assistant.util import digest, dumps
+from test_runtime import patch_loopback_environment
 
 
 class FakeHTTP:
@@ -72,6 +73,7 @@ class FakeHTTP:
 
 class MessageTests(unittest.TestCase):
     def setUp(self):
+        patch_loopback_environment(self)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)

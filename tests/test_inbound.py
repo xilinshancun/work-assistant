@@ -20,6 +20,7 @@ from work_assistant.process import ProcessResult
 from work_assistant.store import Store, Busy
 from work_assistant.util import dumps, digest
 from test_messages import FakeHTTP
+from test_runtime import patch_loopback_environment
 
 
 def event(**changes):
@@ -66,6 +67,7 @@ class FakePaseo:
 
 class InboundTests(unittest.TestCase):
     def setUp(self):
+        patch_loopback_environment(self)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
         workspace=self.root/'project';workspace.mkdir();self.store=Store(self.root/'state');self.addCleanup(self.store.close)
         self.project=self.store.add_project('synthetic',workspace,['read'])
@@ -315,6 +317,7 @@ class InboundTests(unittest.TestCase):
 
 class PaseoProtocolTests(unittest.TestCase):
     def setUp(self):
+        patch_loopback_environment(self)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
         self.settings={'paseo_argv':['synthetic-paseo'],'gpt_provider':'codex/synthetic','gpt_model':'synthetic-model','cli_timeout':75}
         self.calls=[];self.responses=[]
