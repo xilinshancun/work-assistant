@@ -142,14 +142,29 @@ inside ROOT after symlink resolution, and all inputs are re-read before committi
 Evidence execution_date/report_date aliases require at least one and must agree.
 Optional source_mapping preserves section-to-existing-source-ID arrays as reported
 without inventing claims; missing items becomes an empty list. Missing source summary
-uses an explicit local UI placeholder, while id/verified_at remain required and raw
-source metadata stays private. Imported cards use the blue header template.
+uses an explicit local UI placeholder; ordinary source id remains required, while
+missing verified_at displays "源未提供验证时间 / Not supplied" locally without
+fabricating a date. Present source timestamps must be nonempty bounded text, PR
+observation timestamps remain required, and sources stay reported. Instruction-only
+sources do not create completed tasks or business claims. Raw
+source metadata stays private. Source mappings may also reference PR observations
+with required id/verified_at, with duplicate IDs rejected within/across both sets.
+Local evidence distinguishes source/pr_observation kinds; full PR metadata stays
+private, with no synthesized summary/claim or remote evidence appendix.
+Imported cards use the blue header template, a timezone-local short cutoff hint,
+and the first source summary content paragraph as an escaped bold lead, followed by
+hr and whole plain_text bullet divs, then a gray project/cutoff note. The publisher
+inserts the default-outline remote button before that note; full coverage stays in documents.
 HTMLParser extracts the body title, unique sync-summary and complete readable body
 without active markup/navigation. Table cell/row boundaries and preformatted lines are
 preserved; optional paragraph/list/table end tags are handled, and ambiguous nesting
 is rejected. Only the first visible h1 supplies the title. Seven escaped standard outputs and an ordinary
-immutable report record reuse the existing publisher identity/checkpoints. External documents contain only display title, coverage and source body with its
-original qualifications; cards contain title, coverage and summary. Internal evidence
+immutable report record reuse the existing publisher identity/checkpoints. External documents put their single title in metadata, then one readable coverage
+line and native main content only (no source header/h1/navigation). h2/h3 map to
+heading2/heading3, li and summary p map to bullet, ordinary p to text, details summary
+to heading2. Source bold/italic and all qualifications remain intact. Maximum 1000
+blocks including coverage, 10000 characters/1000 runs per block; reject overflow.
+Local previews reproduce the native structure without executing source markup. Internal evidence
 and technical verification notes remain in local evidence.html/json only. Evidence
 summaries are bounded and attributed as reported; import-specific export checks
 reject recognizable credentials/local paths without rewriting ordinary parameter

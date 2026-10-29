@@ -8,12 +8,14 @@ from html.parser import HTMLParser
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .reports import STYLE, document_blocks, save_report
+from .reports import STYLE, save_report
 from .util import digest, dumps, outbound_guard, strict_json
 
 MAX_STATE = 1024 * 1024
 MAX_FILE = 20 * 1024 * 1024
 MAX_SUMMARY = 6000
+BLOCK_TYPES = {"text": 2, "heading2": 4, "heading3": 5, "bullet": 12}
+MAX_NATIVE_TEXT = 10000
 SCOPE = ("源报告陈述 / Reported source assertions. 导入仅核对日期、水位和文件哈希；"
          "不代表独立测量或科学复现 / not independently measured or reproduced.")
 
@@ -26,8 +28,9 @@ def export_data(value):
     """
     if type(value) is str:
         outbound_guard(value)
-        if re.search(r"(?i)(?:file://|(?:^|[\s\"'(<])~/|[A-Z]:[\\/]|\\\\[^\s\\]+\\|"
-                     r"/(?:Users|home|private|tmp|var|etc|opt|srv|root|mnt|Volumes)/)", value):
+        path_text = re.sub(r"https?://[^\s<>\"']+", "", value, flags=re.I)
+        if re.search(r"(?i)(?:file://|(?:^|[\s\"'(<])~/|\b[A-Z]:[\\/]|\\\\[^\s\\]+\\|"
+                     r"/(?:Users|home|private|tmp|var|etc|opt|srv|root|mnt|Volumes)/)", path_text):
             raise ValueError("daily export contains a local path; remove it from the source text")
         if re.search(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{15,})\b|"
                      r"(?i:bearer\s+[A-Za-z0-9_./+=-]{16,}|https?://[^\s<>]*/(?:bot/v2/hook|webhook)/[^\s<>]+)", value):
@@ -52,6 +55,41 @@ def escape(value):
 
 def md_text(value):
     return re.sub(r"([\\`*_{}\[\]()<>#!|])", r"\\\1", str(value))
+
+
+def card_md_text(value):
+    # Feishu card Markdown requires HTML entities for literal syntax characters.
+    return "".join("&#%s;" % ord(c) if c in "\\`*_{}[]()<>~#!|&" else c for c in value)
+
+
+def block_text(block):
+    key = next(key for key, number in BLOCK_TYPES.items() if number == block["block_type"])
+    return "".join(e["text_run"]["content"] for e in block[key]["elements"])
+
+
+def native_html(blocks):
+    result, in_list = [], False
+    for block in blocks:
+        kind = next(key for key, number in BLOCK_TYPES.items() if number == block["block_type"])
+        if kind == "bullet" and not in_list:
+            result.append("<ul>")
+            in_list = True
+        elif kind != "bullet" and in_list:
+            result.append("</ul>")
+            in_list = False
+        tag = {"heading2": "h2", "heading3": "h3", "bullet": "li", "text": "p"}[kind]
+        text = ""
+        for element in block[kind]["elements"]:
+            run = element["text_run"]
+            part = escape(run["content"])
+            style = run.get("text_element_style", {})
+            if style.get("italic"):
+                part = "<em>" + part + "</em>"
+            if style.get("bold"):
+                part = "<strong>" + part + "</strong>"
+            text += part
+        result.append("<%s class='source-line'>%s</%s>" % (tag, text, tag))
+    return "".join(result) + ("</ul>" if in_list else "")
 
 
 def _read(root, relative, limit):
@@ -121,6 +159,7 @@ class VisibleReport(HTMLParser):
         self.body, self.summary, self.title = [], [], []
         self.summary_count = 0
         self.title_seen = False
+        self.tree = []
 
     def _active(self):
         return (any(e[0] == "body" for e in self.stack)
@@ -176,7 +215,9 @@ class VisibleReport(HTMLParser):
             self._append(" | ")
         first_title = tag == "h1" and not hidden and self._active() and not self.title_seen
         self.title_seen = self.title_seen or first_title
-        self.stack.append((tag, bool(hidden), summary, first_title))
+        node = {"tag": tag, "hidden": bool(hidden), "summary": summary, "children": []}
+        (self.stack[-1][4]["children"] if self.stack else self.tree).append(node)
+        self.stack.append((tag, bool(hidden), summary, first_title, node))
         if summary and self._active():
             self.summary_count += 1
         if tag in self.void:
@@ -199,6 +240,8 @@ class VisibleReport(HTMLParser):
             raise ValueError("ambiguous HTML nesting; unmatched closing element")
 
     def handle_data(self, data):
+        if self._active():
+            self.stack[-1][4]["children"].append(data)
         preserve = any(e[0] == "pre" for e in self.stack)
         self._append(data.replace("\r\n", "\n").replace("\r", "\n") if preserve
                      else re.sub(r"\s+", " ", data), preserve)
@@ -235,6 +278,104 @@ class VisibleReport(HTMLParser):
             raise ValueError("source report requires exactly one visible sync-summary")
         return title, summary, body
 
+    def semantic_blocks(self):
+        mains = []
+        def find(nodes):
+            for node in nodes:
+                if type(node) is dict and not node["hidden"]:
+                    if node["tag"] == "main":
+                        mains.append(node)
+                    find(node["children"])
+        find(self.tree)
+        if len(mains) != 1:
+            raise ValueError("source requires exactly one visible main for native delivery")
+        result, summary_parts = [], []
+        inline_tags = {"strong", "b", "em", "i", "span", "a", "code", "s", "small", "u", "br"}
+
+        def inline(node, style=None, preserve=False):
+            style = dict(style or {})
+            if type(node) is str:
+                return [(node.replace("\r\n", "\n").replace("\r", "\n") if preserve
+                         else re.sub(r"\s+", " ", node), style)]
+            if node["hidden"]:
+                return []
+            tag = node["tag"]
+            if tag in {"strong", "b"}:
+                style["bold"] = True
+            if tag in {"em", "i"}:
+                style["italic"] = True
+            if tag == "br":
+                return [("\n", style)]
+            if tag in {"td", "th"}:
+                return [(" | ", {})] + [run for child in node["children"] for run in inline(child, style, preserve)]
+            return [run for child in node["children"] for run in inline(child, style, preserve)]
+
+        def emit(kind, runs, in_summary=False, preserve=False):
+            runs = [(text, style) for text, style in runs if text]
+            if not preserve:
+                while runs and not runs[0][0].strip():
+                    runs.pop(0)
+                while runs and not runs[-1][0].strip():
+                    runs.pop()
+                if runs:
+                    runs[0] = (runs[0][0].lstrip(), runs[0][1])
+                    runs[-1] = (runs[-1][0].rstrip(), runs[-1][1])
+            if not runs:
+                return
+            text = "".join(t for t, _ in runs)
+            if len(text) > MAX_NATIVE_TEXT or len(runs) > 1000:
+                raise ValueError("native block exceeds 10000 characters or 1000 text runs; narrow source")
+            elements = []
+            for text_part, style in runs:
+                run = {"content": text_part}
+                if style:
+                    run["text_element_style"] = style
+                elements.append({"text_run": run})
+            result.append({"block_type": BLOCK_TYPES[kind], kind: {"elements": elements}})
+            if in_summary and kind in {"text", "bullet"}:
+                summary_parts.append(text)
+            if len(result) > 999:  # One additional coverage block is generated below.
+                raise ValueError("document too large; native delivery supports at most 1000 blocks")
+
+        def walk(node, in_summary=False, inherited_kind="text"):
+            if node["hidden"] or node["tag"] in {"header", "h1"}:
+                return
+            tag = node["tag"]
+            in_summary = in_summary or node["summary"]
+            if tag in {"h2", "h3", "summary", "p", "caption", "tr", "pre"}:
+                kind = {"h2": "heading2", "h3": "heading3", "summary": "heading2"}.get(tag, inherited_kind)
+                if tag == "p" and in_summary:
+                    kind = "bullet"
+                if tag == "pre":
+                    # Use hard paragraph boundaries so blank lines are not lost as soft breaks.
+                    line = []
+                    for text, style in inline(node, preserve=True):
+                        parts = text.split("\n")
+                        for index, part in enumerate(parts):
+                            if part:
+                                line.append((part, style))
+                            if index < len(parts) - 1:
+                                emit("text", line or [(" ", {})], preserve=True)
+                                line = []
+                    emit("text", line or [(" ", {})], preserve=True)
+                else:
+                    emit(kind, inline(node), in_summary)
+                return
+            kind = "bullet" if tag == "li" else inherited_kind
+            pending = []
+            for child in node["children"]:
+                if type(child) is str or child["tag"] in inline_tags:
+                    pending.extend(inline(child))
+                else:
+                    emit(kind, pending, in_summary)
+                    pending = []
+                    walk(child, in_summary, kind if tag == "li" else "text")
+            emit(kind, pending, in_summary)
+        walk(mains[0])
+        if not result or not summary_parts:
+            raise ValueError("native delivery requires main content and a summary content paragraph")
+        return result, summary_parts
+
 
 def _evidence_summary(evidence):
     sources, items, limitations = evidence.get("sources"), evidence.get("items", []), evidence.get("limitations")
@@ -243,7 +384,10 @@ def _evidence_summary(evidence):
     mapping = evidence.get("source_mapping", {})
     if type(mapping) is not dict:
         raise ValueError("evidence source_mapping must be an object")
-    if len(sources) + len(items) + len(limitations) + len(mapping) > 1000:
+    observations = evidence.get("pr_observations", [])
+    if type(observations) is not list:
+        raise ValueError("evidence pr_observations must be a list")
+    if len(sources) + len(items) + len(limitations) + len(mapping) + len(observations) > 1000:
         raise ValueError("evidence exceeds 1000 entries")
     selected_sources, selected_items, ids = [], [], set()
     for source in sources:
@@ -255,8 +399,20 @@ def _evidence_summary(evidence):
         ids.add(ident)
         summary = (_text(source["summary"], "source summary") if "summary" in source
                    else "源未提供摘要 / No source summary supplied")
-        selected_sources.append({"id": ident, "summary": summary,
-                                 "verified_at": _text(source.get("verified_at"), "source verified_at", 100)})
+        verified_at = (_text(source["verified_at"], "source verified_at", 100) if "verified_at" in source
+                       else "源未提供验证时间 / Not supplied")
+        selected_sources.append({"id": ident, "kind": "source", "grade": "reported", "summary": summary,
+                                 "verified_at": verified_at})
+    selected_observations = []
+    for observation in observations:
+        if type(observation) is not dict:
+            raise ValueError("PR observation must be an object")
+        ident = _text(observation.get("id"), "PR observation id", 200)
+        if ident in ids:
+            raise ValueError("duplicate evidence source id across sources/PR observations")
+        ids.add(ident)
+        selected_observations.append({"id": ident, "kind": "pr_observation",
+            "verified_at": _text(observation.get("verified_at"), "PR observation verified_at", 100)})
     item_ids = set()
     for item in items:
         if type(item) is not dict:
@@ -271,6 +427,8 @@ def _evidence_summary(evidence):
                                "source_ids": refs, "grade": "reported"})
     selected = {"sources": selected_sources, "items": selected_items,
                 "limitations": [_text(v, "limitation") for v in limitations]}
+    if "pr_observations" in evidence:
+        selected["pr_observations"] = selected_observations
     if "source_mapping" in evidence:
         for section, refs in mapping.items():
             _text(section, "source_mapping section", 200)
@@ -286,27 +444,36 @@ def _evidence_summary(evidence):
 def render_import(snapshot):
     title, summary, body, coverage, selected = (snapshot[k] for k in
                                               ("title", "summary", "body", "coverage", "evidence"))
-    interval = "覆盖区间 / Coverage: %s → %s (%s)" % (
-        coverage["covered_from"], coverage["covered_until"], snapshot["timezone"])
+    zone = ZoneInfo(snapshot["timezone"])
+    start, cutoff = (_timestamp(coverage[k], k).astimezone(zone) for k in ("covered_from", "covered_until"))
+    interval = "覆盖区间：%s — %s（%s）" % (
+        start.strftime("%Y-%m-%d %H:%M"), cutoff.strftime("%Y-%m-%d %H:%M"), snapshot["timezone"])
     evidence_lines = ["证据摘要 / Evidence (reported)"]
     evidence_lines += ["%s: %s (sources: %s)" % (i["id"], i["claim"], ", ".join(i["source_ids"]))
                        for i in selected["items"]]
-    evidence_lines += ["%s: %s (source verified_at: %s; supplied by source)" %
+    evidence_lines += ["%s [reported]: %s (source verified_at: %s)" %
                        (s["id"], s["summary"], s["verified_at"]) for s in selected["sources"]]
+    evidence_lines += ["%s [pr_observation] (source verified_at: %s; supplied by source)" %
+                       (s["id"], s["verified_at"]) for s in selected.get("pr_observations", [])]
     if "source_mapping" in selected:
         evidence_lines += ["章节来源映射 / Section source mapping (reported)"]
         evidence_lines += ["%s → %s" % (section, ", ".join(refs))
                            for section, refs in selected["source_mapping"].items()]
     evidence_lines += ["局限 / Limitations"] + (selected["limitations"] or ["源未列出 / None supplied by source"])
     evidence_text = "\n".join(evidence_lines)
-    plain = title + "\n" + interval + "\n\n" + body
-    document = {"title": title, "children": document_blocks(plain)}
-    # Card limits never silently truncate the source summary. Split into native text elements.
-    card_text = interval + "\n" + summary
+    coverage_block = {"block_type": 2, "text": {"elements": [{"text_run": {"content": interval}}]}}
+    document = {"title": title, "children": [coverage_block] + snapshot["native_blocks"]}
+    time_hint = cutoff.strftime("截至 %m-%d %H:%M")
+    summary_paragraphs = snapshot["summary_paragraphs"]
+    lead, bullets = summary_paragraphs[0], summary_paragraphs[1:]
+    signature = "工作助理 · %s · %s" % (snapshot["project"], time_hint)
     card = {"config": {"wide_screen_mode": True, "update_multi": True},
             "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
-            "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": card_text[i:i + 1500]}}
-                         for i in range(0, len(card_text), 1500)]}
+            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**" + card_md_text(lead) + "**"}},
+                         {"tag": "hr"}]
+                         + [{"tag": "div", "text": {"tag": "plain_text", "content": "• " + text}} for text in bullets]
+                         + [{"tag": "note", "elements": [{"tag": "plain_text", "content": signature}]}]}
+    # The publisher inserts the remote document's default-outline button before the final note.
 
     def paragraphs(text):
         return "".join("<p class='source-line'>" + escape(line) + "</p>" for line in text.split("\n"))
@@ -319,16 +486,20 @@ def render_import(snapshot):
                 + text + "</main></body></html>")
 
     header = "<header><h1>" + escape(title) + "</h1><p>" + escape(interval) + "</p></header>"
-    return {"index.html": page(header + "<section id='sync-summary'>" + paragraphs(summary)
-                                + "</section><section>" + paragraphs(body)
+    return {"index.html": page(header + "<section>" + native_html(snapshot["native_blocks"])
                                 + "</section><a href='evidence.html'>证据 / Evidence</a>"),
             "daily-sync.md": "# " + md_text(title) + "\n\n" + md_text(interval)
-                             + "\n\n" + "\n\n".join(md_text(line) for line in body.splitlines()) + "\n",
+                             + "\n\n" + "\n\n".join(
+                                 ({4: "## ", 5: "### ", 12: "- "}.get(b["block_type"], "") + md_text(block_text(b)))
+                                 for b in snapshot["native_blocks"]) + "\n",
             "evidence.html": page(header + "<p>" + escape(SCOPE) + "</p><section>" + paragraphs(evidence_text)
                                   + "</section><a href='index.html'>完整报告 / Full report</a>"),
             "evidence.json": dumps(snapshot), "card.json": dumps(card), "document.json": dumps(document),
-            "card-preview.html": page(header + "<section>" + paragraphs(summary)
-                                      + "</section><a href='index.html'>完整报告 / Full report</a>")}
+            "card-preview.html": page("<header style='background:#225abc;color:white'><h1>" + escape(title)
+                                      + "</h1></header><section><p><strong>" + escape(lead) + "</strong></p><hr>"
+                                      + "<ul>" + "".join("<li>" + escape(text) + "</li>" for text in bullets) + "</ul>"
+                                      + "<a style='display:inline-block;border:1px solid #bbb;border-radius:6px;padding:8px 16px'"
+                                      + " href='index.html'>打开 Daily Sync</a><p class='meta'>" + escape(signature) + "</p></section>")}
 
 
 def import_daily(store, project, source_root, period, timezone_name="Asia/Shanghai", title=None):
@@ -378,7 +549,9 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
             raise ValueError("source validation.status must be passed")
         if validation.get("report_sha256") != digest(report_raw):
             raise ValueError("source validation report_sha256 mismatch")
-        source_title, summary, body = VisibleReport().extract(report_raw)
+        parsed = VisibleReport()
+        source_title, summary, body = parsed.extract(report_raw)
+        native_blocks, summary_paragraphs = parsed.semantic_blocks()
         coverage = {"covered_from": evidence["covered_from"], "covered_until": evidence["covered_until"]}
         selected = _evidence_summary(evidence)
         snapshot = export_data({"schema": "wa.report.v1", "origin": "external_daily_import",
@@ -386,6 +559,7 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
             "source_hashes": {"report": digest(report_raw), "evidence": digest(evidence_raw), "state": digest(state_raw)},
             "coverage": coverage, "title": source_title if title is None else title,
             "source_title": source_title, "summary": summary, "body": body,
+            "native_blocks": native_blocks, "summary_paragraphs": summary_paragraphs,
             "scope": SCOPE, "tasks": [], "claims": [], "corrections": [], "evidence": selected})
         content = render_import(snapshot)
         # Re-read every input, including state, after extraction/rendering. Changed bytes,

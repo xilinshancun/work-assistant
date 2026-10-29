@@ -1,4 +1,5 @@
 """Entirely synthetic local bundles and injected HTTP protocol fixtures."""
+import html
 import json
 import os
 import shutil
@@ -10,7 +11,7 @@ from unittest.mock import patch
 from work_assistant import daily_import
 from work_assistant.daily_import import import_daily
 from work_assistant.feishu import AmbiguousError, preview, publish, reconcile
-from work_assistant.reports import load_report
+from work_assistant.reports import generate_report, load_report
 from work_assistant.util import digest, dumps
 from test_runtime import Base
 
@@ -91,7 +92,85 @@ class DailyImportTests(Base):
 
     def document_text(self, record):
         blocks = preview(self.s, record["id"])["document"]["children"]
-        return "\n".join(b["text"]["elements"][0]["text_run"]["content"] for b in blocks)
+        return "\n".join(daily_import.block_text(b) for b in blocks)
+
+    def test_native_document_headings_bullets_styles_and_single_metadata_title(self):
+        source = """<body><header><h1>合成源标题</h1><p>重复覆盖提示</p><nav>顶部导航</nav></header><main>
+        <header><p>正文头部提示</p></header><h1>重复正文标题</h1>
+        <section id="sync-summary"><h2>Sync 精简版</h2>
+        <p><strong>核心进展：</strong>完成合成检查，<em>尚未独立复现</em>。</p>
+        <p>风险仍在，<strong><em>不能当作已解决</em></strong>。</p><p>下一步仅为计划，没有截止承诺。</p></section>
+        <section><h2>进展</h2><h3>详细结果</h3><p>原文条件：仅在合成环境观察到。</p>
+        <ul><li><strong>事项：</strong>逐行理解 PR，尚未完成。</li></ul>
+        <details><summary>补充说明</summary><p>折叠限定：仍需人工复核。</p></details></section></main>
+        <footer>底部导航</footer></body>"""
+        self.write_bundle(source)
+        report = self.load(title="正式合成日报")
+        files = self.files(report)
+        document = json.loads(files["document.json"])
+        self.assertEqual(document["title"], "正式合成日报")
+        self.assertEqual([b["block_type"] for b in document["children"]], [2, 4, 12, 12, 12, 4, 5, 2, 12, 4, 2])
+        text = self.document_text(report)
+        self.assertEqual(text.count("覆盖区间："), 1)
+        self.assertIn("覆盖区间：2026-01-14 17:30 — 2026-01-15 17:30（Asia/Shanghai）", text)
+        for forbidden in ("合成源标题", "正式合成日报", "重复正文标题", "重复覆盖提示", "正文头部提示", "顶部导航", "底部导航"):
+            self.assertNotIn(forbidden, text)
+        for phrase in ("核心进展：完成合成检查，尚未独立复现。", "风险仍在，不能当作已解决。",
+                       "原文条件：仅在合成环境观察到。", "事项：逐行理解 PR，尚未完成。", "折叠限定：仍需人工复核。"):
+            self.assertIn(phrase, text)
+        first = document["children"][2]["bullet"]["elements"]
+        self.assertEqual(first[0]["text_run"]["text_element_style"], {"bold": True})
+        self.assertEqual(first[2]["text_run"]["text_element_style"], {"italic": True})
+        combined = document["children"][3]["bullet"]["elements"][1]["text_run"]
+        self.assertEqual(combined["text_element_style"], {"bold": True, "italic": True})
+        self.assertIn("<h2 class='source-line'>进展</h2>", files["index.html"])
+        self.assertIn("<h3 class='source-line'>详细结果</h3>", files["index.html"])
+        self.assertIn("<strong><em>不能当作已解决</em></strong>", files["index.html"])
+        self.assertEqual(files["index.html"].count("<h1>"), 1)
+        self.assertNotIn("重复覆盖提示", files["index.html"])
+        self.assertIn("<li class='source-line'>", files["index.html"])
+
+    def test_native_card_bold_lead_safe_markdown_hr_bullets_note_and_preview(self):
+        phrase = "保留 **字面量** [链接](https://example.invalid/home/page) 与 &lt;at id=all&gt;。"
+        source = HTML.replace("<h2>今日摘要</h2><p>完成合成检查，<strong>结论仍有限</strong>。</p>",
+                              "<h2>Sync 精简版</h2><p>" + phrase + "</p><p>风险尚未排除。</p><p>计划未完成。</p>")
+        self.write_bundle(source)
+        report = self.load()
+        files = self.files(report)
+        card = json.loads(files["card.json"])
+        self.assertEqual(card["header"]["template"], "blue")
+        self.assertEqual([e["tag"] for e in card["elements"]], ["div", "hr", "div", "div", "note"])
+        lead = card["elements"][0]["text"]["content"]
+        self.assertTrue(lead.startswith("**") and lead.endswith("**"))
+        self.assertIn("&#42;&#42;字面量&#42;&#42;", lead)
+        self.assertIn("&#91;链接&#93;&#40;https://example.invalid/home/page&#41;", lead)
+        self.assertNotIn("<at", lead)
+        self.assertEqual(html.unescape(lead[2:-2]), html.unescape(phrase))
+        self.assertEqual(card["elements"][2]["text"], {"tag": "plain_text", "content": "• 风险尚未排除。"})
+        note = card["elements"][-1]["elements"][0]["content"]
+        self.assertIn("工作助理 · test · 截至 01-15 17:30", note)
+        self.assertIn("<strong>", files["card-preview.html"])
+        self.assertIn("<hr>", files["card-preview.html"])
+        self.assertIn("border:1px solid", files["card-preview.html"])
+        self.assertIn("class='meta'", files["card-preview.html"])
+        self.assertNotIn("Sync 精简版", files["card.json"])
+
+    def test_native_export_allows_http_urls_but_checks_local_paths_and_webhooks(self):
+        text = "参考 https://example.invalid/home/page 与 http://example.invalid/var/test"
+        self.assertEqual(daily_import.export_data(text), text)
+        for text in ("https://example.invalid/page C:/private/file", "http://example.invalid/page /tmp/private.json",
+                     "https://example.invalid/webhook/synthetic-secret"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                daily_import.export_data(text)
+
+    def test_native_requires_main_and_rejects_oversize_paragraph_without_truncation(self):
+        self.write_bundle(HTML.replace("<main>", "<div>").replace("</main>", "</div>"))
+        with self.assertRaisesRegex(ValueError, "one visible main"):
+            self.load()
+        self.write_bundle(HTML.replace("<h2>详细结果</h2>", "<p>" + "字" * 10001 + "</p>"))
+        with self.assertRaisesRegex(ValueError, "native block exceeds"):
+            self.load()
+        self.assertEqual(self.s.records("report"), [])
 
     def test_date_aliases_require_one_and_agree_when_both_present(self):
         for fields in ({"execution_date": PERIOD}, {"report_date": PERIOD},
@@ -162,7 +241,7 @@ class DailyImportTests(Base):
                     self.load()
         self.assertEqual(self.s.records("report"), [])
 
-    def test_optional_summary_is_validated_when_present_verified_at_still_required(self):
+    def test_optional_summary_is_validated_when_present_source_verified_at_optional(self):
         for summary in (None, "", "字" * 2001, 123):
             with self.subTest(summary=summary):
                 self.evidence["sources"][0]["summary"] = summary
@@ -172,8 +251,130 @@ class DailyImportTests(Base):
         del self.evidence["sources"][0]["summary"]
         del self.evidence["sources"][0]["verified_at"]
         self.write_metadata()
-        with self.assertRaisesRegex(ValueError, "source verified_at"):
+        self.assertIn("源未提供验证时间 / Not supplied", self.files(self.load())["evidence.html"])
+
+    def test_instruction_source_without_verified_at_stays_reported_and_private(self):
+        instruction = {"id": "s_instruction", "post_cutoff_instruction_only": True,
+                       "summary": "合成用户指令：任务梳理和逐行理解 PR，仍待完成。"}
+        self.evidence.pop("items")
+        self.evidence["sources"].append(instruction)
+        self.evidence["source_mapping"] = {"next-actions": ["s_instruction"]}
+        self.write_metadata()
+        before = self.evidence_path.read_bytes()
+        report = self.load()
+        files = self.files(report)
+        local = json.loads(files["evidence.json"])
+        selected = local["evidence"]["sources"][-1]
+        self.assertEqual(selected["id"], "s_instruction")
+        self.assertEqual(selected["grade"], "reported")
+        self.assertEqual(selected["verified_at"], "源未提供验证时间 / Not supplied")
+        self.assertEqual(local["claims"], [])
+        self.assertEqual(report["data"]["source_evidence"]["sources"][-1], instruction)
+        self.assertNotIn("verified_at", report["data"]["source_evidence"]["sources"][-1])
+        self.assertEqual(self.evidence_path.read_bytes(), before)
+        self.assertIn("源未提供验证时间 / Not supplied", files["evidence.html"])
+        for name in ("document.json", "card.json"):
+            self.assertNotIn(instruction["summary"], files[name])
+            self.assertNotIn("Not supplied", files[name])
+        ordinary = generate_report(self.s, self.p["id"], PERIOD)
+        ordinary_snapshot = json.loads(self.files(ordinary)["evidence.json"])
+        self.assertEqual(ordinary_snapshot["claims"], [])
+        self.assertEqual(ordinary_snapshot["tasks"], [])
+        self.assertNotIn(instruction["summary"], self.files(ordinary)["index.html"])
+        self.assertEqual(self.s.records("claim"), [])
+
+    def test_source_verified_at_present_requires_nonempty_bounded_text(self):
+        for value in (None, "", " ", 123, False, "字" * 101):
+            with self.subTest(value=value):
+                self.evidence["sources"][0]["verified_at"] = value
+                self.write_metadata()
+                with self.assertRaisesRegex(ValueError, "source verified_at"):
+                    self.load()
+        self.assertEqual(self.s.records("report"), [])
+
+    def test_mapping_can_reference_distinct_pr_observations_without_exporting_details(self):
+        observation = {"id": "pr_fixture", "verified_at": "2026-01-15T17:15:00+08:00",
+            "url": "https://example.invalid/pull/7", "author": "synthetic-author", "state": "open",
+            "merged_at": None, "head_sha": "0123456789abcdef", "review": {"status": "fixture-review"},
+            "checks": ["fixture-check"], "note": "synthetic-private-note",
+            "verification_history": [{"at": "2026-01-15T17:00:00+08:00", "note": "fixture-history"}]}
+        self.evidence.pop("items")
+        self.evidence.update(pr_observations=[observation], source_mapping={"progress": ["s1", "pr_fixture"]})
+        self.write_metadata()
+        before = self.evidence_path.read_bytes()
+        report = self.load()
+        files = self.files(report)
+        local = json.loads(files["evidence.json"])["evidence"]
+        self.assertEqual(local["sources"][0]["kind"], "source")
+        self.assertEqual(local["pr_observations"], [{"id": "pr_fixture", "kind": "pr_observation",
+                                                   "verified_at": observation["verified_at"]}])
+        self.assertNotIn("summary", local["pr_observations"][0])
+        self.assertEqual(local["items"], [])
+        self.assertEqual(local["source_mapping"], {"progress": ["s1", "pr_fixture"]})
+        self.assertEqual(report["data"]["source_evidence"]["pr_observations"], [observation])
+        self.assertIn("pr_fixture [pr_observation]", files["evidence.html"])
+        self.assertEqual(before, self.evidence_path.read_bytes())
+        for detail in ("pr_fixture", observation["verified_at"], observation["url"], observation["author"],
+                       observation["head_sha"], "fixture-review", "fixture-check", observation["note"], "fixture-history"):
+            self.assertNotIn(detail, files["document.json"])
+            self.assertNotIn(detail, files["card.json"])
+        self.assertEqual(self.s.records("claim"), [])
+
+    def test_pr_observation_refs_require_ids_verified_at_and_no_collisions(self):
+        valid = {"id": "pr_fixture", "verified_at": "2026-01-15T17:15:00+08:00"}
+        self.evidence["source_mapping"] = {"progress": ["pr_fixture"]}
+        cases = [(None, "pr_observations"), (["bad"], "must be an object"),
+                 ([{"verified_at": valid["verified_at"]}], "PR observation id"),
+                 ([{"id": "pr_fixture"}], "PR observation verified_at"),
+                 ([dict(valid, id="s1")], "duplicate evidence source id"),
+                 ([valid, dict(valid)], "duplicate evidence source id")]
+        for observations, message in cases:
+            with self.subTest(observations=observations):
+                self.evidence["pr_observations"] = observations
+                self.write_metadata()
+                with self.assertRaisesRegex(ValueError, message):
+                    self.load()
+        self.evidence["pr_observations"] = [valid]
+        self.evidence["source_mapping"] = {"progress": ["pr_missing"]}
+        self.write_metadata()
+        with self.assertRaisesRegex(ValueError, "source_mapping"):
             self.load()
+        self.assertEqual(self.s.records("report"), [])
+
+    def test_card_uses_local_short_time_and_separate_unchanged_plain_text_paragraphs(self):
+        paragraphs = ["进展：保留 **原文** 与 [示例](fixture-reference)。",
+                      "风险：尚未独立复现，仅适用合成环境。", "下一步：人工核对，没有承诺截止日期。"]
+        summary_html = "<h2>Sync 精简版</h2>" + "".join("<p>" + text + "</p>" for text in paragraphs)
+        self.evidence["covered_until"] = "2026-01-15T09:30:00Z"
+        self.state["daily"]["covered_until"] = self.evidence["covered_until"]
+        self.write_bundle(HTML.replace("<h2>今日摘要</h2><p>完成合成检查，<strong>结论仍有限</strong>。</p>", summary_html))
+        report = self.load()
+        files = self.files(report)
+        card = json.loads(files["card.json"])
+        self.assertEqual(card["header"]["template"], "blue")
+        self.assertEqual(card["elements"][0]["text"]["tag"], "lark_md")
+        self.assertEqual(html.unescape(card["elements"][0]["text"]["content"])[2:-2], paragraphs[0])
+        self.assertEqual(card["elements"][1], {"tag": "hr"})
+        self.assertEqual([e["text"]["content"] for e in card["elements"][2:-1]], ["• " + p for p in paragraphs[1:]])
+        self.assertEqual(card["elements"][-1]["tag"], "note")
+        self.assertNotIn(self.evidence["covered_from"], files["card.json"])
+        self.assertNotIn(self.evidence["covered_until"], files["card.json"])
+        self.assertNotIn(self.evidence["covered_until"], files["card-preview.html"])
+        self.assertIn("截至 01-15 17:30", files["card-preview.html"])
+        snapshot = json.loads(files["evidence.json"])
+        self.assertEqual(snapshot["summary"], "\n".join(["Sync 精简版"] + paragraphs))
+        self.assertIn("2026-01-14 17:30", self.document_text(report))
+        self.assertIn("2026-01-15 17:30", self.document_text(report))
+        for paragraph in paragraphs:
+            self.assertIn(paragraph, snapshot["body"])
+            self.assertIn(paragraph, self.document_text(report))
+
+    def test_long_card_paragraph_is_kept_whole_without_chunking_or_truncation(self):
+        paragraph = "合成详情" * 400
+        self.write_bundle(HTML.replace("<h2>今日摘要</h2><p>完成合成检查，<strong>结论仍有限</strong>。</p>",
+                                       "<p>" + paragraph + "</p>"))
+        card = json.loads(self.files(self.load())["card.json"])
+        self.assertEqual(html.unescape(card["elements"][0]["text"]["content"])[2:-2], paragraph)
 
     def test_compact_table_preserves_caption_cells_and_rows(self):
         table = "<table><caption>样本计数</caption><tr><th>A<th>B<tr><td>10<td>20</table>"
@@ -268,7 +469,8 @@ class DailyImportTests(Base):
         payload = preview(self.s, report["id"])
         self.assertEqual(payload["document"]["title"], "合成项目 · 每日进展")
         self.assertEqual(payload["card"]["header"]["title"]["content"], "合成项目 · 每日进展")
-        self.assertIn("第二章节标题", self.document_text(report))
+        self.assertIn("第二章节标题", json.loads(self.files(report)["evidence.json"])["body"])
+        self.assertNotIn("第二章节标题", self.document_text(report))
         self.assertNotIn("隐藏标题", self.document_text(report))
 
     def test_identical_import_restores_missing_files_but_never_tampering(self):
@@ -302,10 +504,10 @@ class DailyImportTests(Base):
         self.assertEqual(card["header"]["title"]["content"], "合成项目 · 每日进展")
         card_text = "\n".join(e["text"]["content"] for e in card["elements"] if e["tag"] == "div")
         self.assertIn("结论仍有限", card_text)
-        self.assertIn(self.evidence["covered_until"], card_text)
+        self.assertIn("截至 01-15 17:30", card["elements"][-1]["elements"][0]["content"])
         self.assertNotIn("第一条中文详情", card_text)
         document = preview(self.s, report["id"])["document"]
-        text = "\n".join(b["text"]["elements"][0]["text_run"]["content"] for b in document["children"])
+        text = self.document_text(report)
         for expected in ("2026-01-15", "第一条中文详情", "第二条限定", "折叠的完整细节", "尚未独立复现"):
             self.assertIn(expected, text)
         for forbidden in (daily_import.SCOPE, "证据摘要", "十个合成样本；仅为源陈述", "s1", "verified_at", "[REDACTED]"):
@@ -350,7 +552,8 @@ class DailyImportTests(Base):
         payload = preview(self.s, updated["id"])
         self.assertEqual(payload["document"]["title"], title)
         self.assertEqual(payload["card"]["header"]["title"]["content"], title)
-        self.assertEqual(payload["document"]["children"][0]["text"]["elements"][0]["text_run"]["content"], title)
+        self.assertNotIn(title, self.document_text(updated))
+        self.assertTrue(daily_import.block_text(payload["document"]["children"][0]).startswith("覆盖区间："))
         self.assertNotEqual(first["data"]["hash"], updated["data"]["hash"])
         self.assertEqual(first["data"]["period"], updated["data"]["period"])
         self.assertEqual(first["data"]["source_hashes"], updated["data"]["source_hashes"])
