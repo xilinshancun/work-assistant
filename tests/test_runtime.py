@@ -111,6 +111,8 @@ class RoutingTests(Base):
         calls = []
         def process(argv, prompt, **kwargs):
             calls.append(argv)
+            if argv[-3:] == ["mcp", "list", "--json"]:
+                return ProcessResult("[]")
             if argv[0] == "missing-dsh-synthetic":
                 raise ProcessLaunchError("synthetic optional binary missing")
             return ProcessResult(events({"type": "thread.started", "thread_id": "synthetic"},
@@ -118,7 +120,8 @@ class RoutingTests(Base):
                 {"type": "turn.completed"}))
         accepted = route_task(self.s, Providers(self.conf, process), ident)
         self.assertTrue(accepted["data"]["accepted"])
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[1][-3:], ["mcp", "list", "--json"])
         self.assertIn("missing", self.s.records("route", task_id=ident)[1]["data"]["fallback_reason"])
     def test_simple_and_exact_cache(self):
         ident = self.task()
@@ -255,12 +258,15 @@ class ProcessTests(Base):
         calls = []
         def process(argv, prompt, **kwargs):
             calls.append((argv, prompt, kwargs))
+            if argv[-3:] == ["mcp", "list", "--json"]:
+                return ProcessResult("[]")
             return ProcessResult(returncode=1)
         providers = Providers(self.conf, process)
         for provider in ("dsh", "codex", "claude_code"):
             providers.invoke(provider, "test", self.root, classifier=provider == "dsh")
         self.assertEqual(calls[0][2]["env"]["DSH_PERMISSION_MODE"], "read-only")
-        self.assertIn("read-only", calls[1][0])
-        self.assertIn("Read,Glob,Grep", calls[2][0])
-        self.assertNotIn("--bare", calls[2][0])
+        self.assertEqual(calls[1][0][-3:], ["mcp", "list", "--json"])
+        self.assertIn("read-only", calls[2][0])
+        self.assertIn("Read,Glob,Grep", calls[3][0])
+        self.assertNotIn("--bare", calls[3][0])
         self.assertFalse(any("bypass" in a for call in calls for a in call[0]))

@@ -35,6 +35,53 @@ def protocol_events(provider, stdout, diagnostics):
     return events
 
 
+class MCPPreflightError(ValueError):
+    """Codex cannot safely start without enumerating its configured MCP servers."""
+
+
+def codex_local_argv(argv):
+    # Per-invocation trusted policy. Provider authentication/model transport stays intact.
+    return list(argv) + ["-c", "features.apps=false", "-c", 'web_search="disabled"',
+                        "-c", "sandbox_workspace_write.network_access=false"]
+
+
+def codex_mcp_preflight(argv, env, cwd, process=execute, timeout=10, pass_fds=()):
+    """Read names/enable flags only; never persist MCP transport/env/auth data."""
+    try:
+        result = process(codex_local_argv(argv) + ["mcp", "list", "--json"], "", cwd=cwd, env=env,
+                         timeout=min(timeout, 10), pass_fds=pass_fds, max_bytes=128 * 1024)
+    except OSError:
+        raise MCPPreflightError("Codex MCP preflight could not start; model execution blocked")
+    if result.returncode != 0 or result.timed_out or result.truncated:
+        raise MCPPreflightError("Codex MCP preflight failed/timed out; CLI must support mcp list --json; model execution blocked")
+    try:
+        servers = strict_json(result.stdout)
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        raise MCPPreflightError("Codex MCP preflight returned invalid JSON; model execution blocked")
+    if type(servers) is not list or len(servers) > 512:
+        raise MCPPreflightError("Codex MCP preflight requires a bounded server array; model execution blocked")
+    names, disabled = set(), []
+    for server in servers:
+        if type(server) is not dict or type(server.get("name")) is not str or type(server.get("enabled")) is not bool:
+            raise MCPPreflightError("Codex MCP preflight returned malformed server metadata; model execution blocked")
+        name = server["name"]
+        if not name or len(name) > 512 or name in names or any(ord(c) < 32 or ord(c) == 127 for c in name):
+            raise MCPPreflightError("Codex MCP preflight returned an invalid/duplicate name; model execution blocked")
+        try:
+            name.encode("utf-8", "strict")
+        except UnicodeError:
+            raise MCPPreflightError("Codex MCP preflight returned a non-UTF8 name; model execution blocked")
+        names.add(name)
+        if server["enabled"]:
+            disabled.append(name)
+    overrides = []
+    for name in sorted(disabled):
+        # JSON basic-string escaping is also valid TOML here (controls rejected).
+        overrides += ["-c", "mcp_servers.%s.enabled=false" % json.dumps(name, ensure_ascii=False)]
+    return overrides, {"disabled_count": len(disabled), "server_count": len(names),
+                       "latency_ms": result.latency_ms, "diagnostics": list(result.diagnostics)}
+
+
 def parse(provider, result, action="read"):
     answer = {"status": "failed", "text": "", "session_id": None, "tool_calls": False,
               "error": "", "latency_ms": result.latency_ms, "stderr": redact(result.stderr),
@@ -160,6 +207,14 @@ class Providers:
             else:
                 policy = execution_policy(provider, action)
                 if provider == "codex":
+                    try:
+                        overrides, preflight = codex_mcp_preflight(argv, env, cwd, self.process,
+                                                                  timeout=conf["timeout"], pass_fds=pass_fds)
+                    except MCPPreflightError as exc:
+                        return {"status": "failed", "protocol_status": "not_started", "text": "", "session_id": None,
+                                "tool_calls": False, "error": str(exc), "latency_ms": 0, "stderr": "",
+                                "protocol_log": "", "launched": False, "preflight_failed": True}
+                    argv = codex_local_argv(argv) + overrides
                     argv += ["exec"]
                     if session_id:
                         # Resume parser has no -s/-C flags; use global config overrides.
@@ -188,6 +243,10 @@ class Providers:
             try:
                 result = self.process(argv, prompt, cwd=cwd, env=env, timeout=conf["timeout"], pass_fds=pass_fds)
                 parsed = parse(provider, result, action)
+                if provider == "codex":
+                    parsed["mcp_preflight"] = preflight
+                    parsed["execution_latency_ms"] = parsed["latency_ms"]
+                    parsed["latency_ms"] += preflight["latency_ms"]
                 # Final file is supplemental; terminal stream validation is still mandatory.
                 if provider == "codex" and parsed["status"] == "completed" and output.exists():
                     if output.stat().st_size > 2 * 1024 * 1024:

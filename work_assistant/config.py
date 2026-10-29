@@ -78,12 +78,14 @@ def init(path):
 
 def doctor(conf, process=None):
     from .process import execute
+    from .executors import codex_mcp_preflight, MCPPreflightError
     process = process or execute
     result = {}
     for name, item in conf["providers"].items():
         executable = item["argv"][0]
         found = shutil.which(executable)
         capabilities = {}
+        mcp_error = None
         if found:
             args = list(item["argv"]) + (["exec", "--help"] if name == "codex" else ["--help"])
             response = process(args, "", cwd=Path(conf["config_path"]).parent, env=item["env"], timeout=10, max_bytes=128 * 1024)
@@ -92,12 +94,20 @@ def doctor(conf, process=None):
                        "dsh": ["--profile"]}[name]
             capabilities = {option: option in response.stdout for option in options}
             capabilities["help_success"] = response.returncode == 0 and not response.timed_out and not response.truncated
+            if name == "codex":
+                try:
+                    _, metadata = codex_mcp_preflight(item["argv"], item["env"], Path(conf["config_path"]).parent,
+                                                      process=process)
+                    capabilities["mcp_isolation_ready"] = True
+                except MCPPreflightError as exc:
+                    capabilities["mcp_isolation_ready"] = False
+                    mcp_error = "cannot safely start Codex: " + str(exc)
         missing = {"dsh": "optional: classification failures escalate once to the configured Codex planner",
                    "codex": "needed for GPT escalation and Codex execution; configure argv or install/login separately",
                    "claude_code": "optional executor; independent opposite-provider review needs both executors"}
         result[name] = {"installed": bool(found), "configured_env_keys": sorted(item["env"]),
                         "authentication": "not tested", "capabilities": capabilities,
-                        "diagnostic": "available; authentication untested" if found else missing[name]}
+                        "diagnostic": mcp_error or ("available; authentication untested" if found else missing[name])}
     pub = conf["publisher"]
     result["feishu"] = {"mode": pub["mode"], "configured": all(os.environ.get(pub[k]) for k in
         (("webhook_env",) if pub["mode"] == "webhook" else ("app_id_env", "app_secret_env", "receive_id_env"))),

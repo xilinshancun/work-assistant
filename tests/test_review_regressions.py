@@ -95,12 +95,16 @@ class ReviewRegressions(Base):
         result = Providers(self.conf, missing).invoke("codex", "test", self.root, action="write_workspace")
         self.assertEqual(result["status"], "failed")
         self.assertIs(result["launched"], False)
-        def after_launch(*args, **kwargs):
+        def after_launch(argv, *args, **kwargs):
+            if argv[-3:] == ["mcp", "list", "--json"]:
+                return ProcessResult("[]")
             raise OSError("synthetic process cleanup error after launch")
         result = Providers(self.conf, after_launch).invoke("codex", "test", self.root, action="write_workspace")
         self.assertEqual(result["status"], "outcome_unknown")
         self.assertIs(result["launched"], True)
         def completed(argv, *args, **kwargs):
+            if argv[-3:] == ["mcp", "list", "--json"]:
+                return ProcessResult("[]")
             Path(argv[argv.index("-o") + 1]).write_text("synthetic final")
             return ProcessResult(events({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
                                         {"type": "turn.completed"}))
@@ -191,6 +195,8 @@ class ReviewRegressions(Base):
         observations = []
         def process(argv, prompt, cwd, **kwargs):
             observations.append((argv, str(cwd), [p.name for p in Path(cwd).iterdir()]))
+            if argv[-3:] == ["mcp", "list", "--json"]:
+                return ProcessResult("[]")
             return ProcessResult(returncode=1)
         providers = Providers(self.conf, process)
         for provider in ("dsh", "codex"):

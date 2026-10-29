@@ -16,6 +16,8 @@ from .util import atomic_write, dumps
 
 
 def synthetic_process(argv, prompt, cwd, **kwargs):
+    if argv[-3:] == ["mcp", "list", "--json"]:
+        return ProcessResult("[]", latency_ms=1)
     if prompt.startswith("Classify"):
         task_id = re.search(r'"task_id":"([^"]+)"', prompt).group(1)
         planner = "exec" in argv
