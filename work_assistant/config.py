@@ -12,6 +12,7 @@ DEFAULT = {
         "codex": {"argv": ["codex"], "env": {}, "timeout": 600, "planner_effort": "low", "effort": "medium"},
         "claude_code": {"argv": ["claude"], "env": {}, "timeout": 600}},
     "publisher": {"mode": "app", "transport": "http", "app_id_env": "FEISHU_APP_ID", "app_secret_env": "FEISHU_APP_SECRET",
+                  "document_layout": "per_period", "timeline_title": "Daily Sync", "timeline_max_blocks": 3000,
                   "receive_id_env": "FEISHU_RECEIVE_ID", "receive_id_type": "chat_id", "webhook_env": "FEISHU_WEBHOOK",
                   "folder_token_env": "FEISHU_FOLDER_TOKEN", "grants": []},
     "ingest_paths": []}
@@ -114,8 +115,9 @@ def doctor(conf, process=None):
     if pub.get("transport", "http") == "lark_cli":
         from .lark_cli import LarkCLI
         result["feishu"] = LarkCLI(pub, process=process).diagnose()
+        result["feishu"]["document_layout"] = pub.get("document_layout", "per_period")
         return result
     result["feishu"] = {"mode": pub["mode"], "configured": all(os.environ.get(pub[k]) for k in
         (("webhook_env",) if pub["mode"] == "webhook" else ("app_id_env", "app_secret_env", "receive_id_env"))),
-        "live_tested": False}
+        "live_tested": False, "document_layout": pub.get("document_layout", "per_period")}
     return result
