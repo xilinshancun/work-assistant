@@ -108,6 +108,34 @@ sender and chat; `verification_scope` explicitly excludes URL click-through and
 visual layout. The immutable source retains the exact sent URL/style payload.
 A differing readback remains `verification_pending`, never a new POST.
 
+## Explicit user identity (optional)
+
+`send --identity user` supports text and display-only cards through the official
+`lark_cli` transport. The default remains `--identity bot`; daily report publishing
+and `chats` keep their bot identity. `update-card` currently rejects user receipts.
+In trusted private publisher configuration, set `message_user_open_id` to the
+explicitly approved owner's `ou_...` ID alongside the existing pinned App ID,
+CLI configuration directory and optional profile. Do not commit this binding.
+Complete the official CLI user OAuth separately; this command never starts login,
+changes a profile or exports credentials.
+
+Before recording send intent, the selected configuration must match the App ID
+and Feishu brand. `auth status --json --verify` must verify a ready user, valid
+token, the exact configured owner and both `im:message` and
+`im:message.send_as_user` scopes. APIs then use `--as user` for this invocation.
+GET must return `sender_type=user`, `id_type=open_id` and that exact owner, with
+the same message, chat and text/card projection checks described above. A bot
+sender cannot verify a user receipt. Card URL/style verification limits still
+apply. No real account validation is implied by the synthetic tests.
+
+Receipts bind the original request ID to its identity and expected sender.
+Legacy records without an identity remain bot records. Changing identity under
+the same request ID is rejected; a distinct user request is not mistaken for an
+old bot request. `inspect ACTION_ID` selects the recorded identity and rejects a
+changed configured owner. Authentication failure starts no POST; ambiguous sends
+retain unknown and are never replayed automatically. Raw OAuth status, user names,
+tokens and CLI output are not included in receipts.
+
 ## Update a known card in place
 
 ```sh

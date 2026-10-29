@@ -45,6 +45,23 @@ def _request(value):
     return value
 
 
+def _identity(settings, identity):
+    if identity not in ("bot", "user"):
+        raise MessageError("message identity must be bot or user")
+    if identity == "user":
+        if settings.get("transport") != "lark_cli":
+            raise MessageError("user messages require publisher.transport=lark_cli")
+        return _id(settings.get("message_user_open_id"), "trusted message user", "ou_")
+    return None
+
+
+def _client(settings, identity, transport, base, process):
+    if identity == "user":
+        from .user_lark_cli import UserLarkCLI
+        return UserLarkCLI(dict(settings), process=process)
+    return make_client(dict(settings), transport=transport, base=base, process=process)
+
+
 def _text_file(path):
     with os.fdopen(os.open(str(Path(path).expanduser()), os.O_RDONLY | os.O_NONBLOCK), "rb") as source:
         if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
@@ -83,8 +100,8 @@ def _receipt(record, no_op=False):
     fields = ("request_id", "status", "verification_status", "uuid", "receive_id_type", "receive_id",
               "text_sha256", "target_sha256", "expected_sender_app_id", "message_id", "chat_id",
               "send_acknowledged", "checks", "error", "verified_at", "resolution", "msg_type", "verification_scope",
-              "operation", "update_parent", "superseded_by", "pending")
-    return dict({key: data.get(key) for key in fields}, action_id=record["id"], no_op=no_op)
+              "operation", "update_parent", "superseded_by", "pending", "expected_sender_user_open_id")
+    return dict({key: data.get(key) for key in fields}, identity=data.get("identity", "bot"), action_id=record["id"], no_op=no_op)
 
 
 def _persist_text(store, ident, raw):
@@ -157,9 +174,11 @@ def _readback(store, record, client, persist=True):
             raise MessageError("invalid readback message")
         sender, body = message.get("sender"), message.get("body")
         content = strict_json(body["content"]) if type(body) is dict and type(body.get("content")) is str else None
+        user = data.get("identity", "bot") == "user"
         checks = {"message_id": message.get("message_id") == data["message_id"],
-                  "sender": (type(sender) is dict and sender.get("sender_type") == "app"
-                             and sender.get("id_type") == "app_id" and sender.get("id") == data["expected_sender_app_id"]),
+                  "sender": (type(sender) is dict and sender.get("sender_type") == ("user" if user else "app")
+                             and sender.get("id_type") == ("open_id" if user else "app_id")
+                             and sender.get("id") == data.get("expected_sender_user_open_id" if user else "expected_sender_app_id")),
                   "chat": bool(data.get("chat_id")) and message.get("chat_id") == data["chat_id"],
                   "content": (content == card_projection(card) or content == card) if card is not None else (type(content) is dict and set(content) == {"text"} and content["text"] == expected),
                   "msg_type": message.get("msg_type") == data.get("msg_type", "text"),
@@ -192,9 +211,10 @@ def _readback(store, record, client, persist=True):
 
 
 def send(store, settings, request_id, receive_id_type, receive_id, text_file, confirm=False,
-         transport=http, base=BASE, process=None, card_file=None):
+         transport=http, base=BASE, process=None, card_file=None, identity="bot"):
     """One explicit user request. Reentry never performs a second POST."""
     _settings(settings)
+    owner = _identity(settings, identity)
     if type(confirm) is not bool:
         raise MessageError("confirm must be an explicit boolean; model content is not permission")
     _request(request_id)
@@ -217,23 +237,29 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
         record = _find(store, ident)
         if record and (record["data"]["request_id"] != request_id or record["data"]["target_sha256"] != target_hash
                        or record["data"]["text_sha256"] != text_hash or record["data"].get("msg_type", "text") != msg_type
-                       or record["data"].get("operation", "send") != "send"):
+                       or record["data"].get("operation", "send") != "send"
+                       or record["data"].get("identity", "bot") != identity
+                       or (identity == "user" and record["data"].get("expected_sender_user_open_id") != owner)):
             raise MessageError("request-id already belongs to different target/content; do not replace it")
         if not confirm:
             return {"status": "dry_run", "action_id": ident, "request_id": request_id,
                     "receive_id_type": receive_id_type, "receive_id": receive_id,
                     "text": text, "text_sha256": text_hash, "target_sha256": target_hash,
-                    "prior_status": record["data"]["status"] if record else None, "confirm_required": True, "msg_type": msg_type}
+                    "prior_status": record["data"]["status"] if record else None, "confirm_required": True, "msg_type": msg_type,
+                    "identity": identity, "expected_sender_user_open_id": owner}
         if record:
             return _receipt(_recover(store, record), no_op=True)
         for prior in store.records(KIND):
             previous = prior["data"]
             if (previous["target_sha256"] == target_hash and previous["text_sha256"] == text_hash
+                    and previous.get("identity", "bot") == identity
+                    and (identity == "bot" or previous.get("expected_sender_user_open_id") == owner)
                     and previous["status"] in UNRESOLVED):
                 raise MessageError("identical message has an unresolved action " + prior["id"] + "; inspect it, do not replace request-id")
         artifact = _persist_text(store, ident, raw)
         with store.transaction():
             record = store.record(KIND, {"schema": "wa.message.v1", "request_id": request_id,
+                "identity": identity, "expected_sender_user_open_id": owner,
                 "receive_id_type": receive_id_type, "receive_id": receive_id, "target_sha256": target_hash,
                 "text_sha256": text_hash, "source_artifact": artifact, "msg_type": msg_type,
                 "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, "wa.outgoing-message:" + request_id)),
@@ -241,7 +267,7 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
                 "message_id": None, "chat_id": receive_id if receive_id_type == "chat_id" else None,
                 "send_acknowledged": False}, ident=ident)
         try:
-            client = make_client(dict(settings), transport=transport, base=base, process=process)
+            client = _client(settings, identity, transport, base, process)
             app_id = _id(client.app_id(), "application ID", "cli_")
             client.authenticate()  # All authentication occurs before write-ahead message intent.
             record = _save(store, record, expected_sender_app_id=app_id)
@@ -296,6 +322,8 @@ def update_card(store, settings, action_id, request_id, card_file, confirm=False
     if original is None:
         raise MessageError("unknown outgoing message action ID")
     old = original["data"]
+    if old.get("identity", "bot") != "bot":
+        raise MessageError("update-card does not support user identity")
     if old.get("msg_type") != "interactive" or not old.get("message_id") or not old.get("chat_id") or not old.get("expected_sender_app_id"):
         raise MessageError("update-card requires an original app/card/chat receipt")
     ident, text_hash = _action_id(request_id), digest(raw)
@@ -377,13 +405,17 @@ def inspect(store, settings, action_id, transport=http, base=BASE, process=None)
     record = _find(store, action_id)
     if record is None:
         raise MessageError("unknown outgoing message action ID")
+    identity = record["data"].get("identity", "bot")
+    owner = _identity(settings, identity)
+    if identity == "user" and record["data"].get("expected_sender_user_open_id") != owner:
+        raise MessageError("inspect requires the original trusted user identity")
     with store.inspection_lock(["message:" + digest(record["data"]["request_id"])] + _remote_resources(record["data"])):
         record = _recover(store, store.get(action_id))
         if record["data"]["status"] in {"resolved_absent", "superseded", "not_applied"} or not record["data"].get("message_id"):
             return _receipt(record, no_op=True)
         if record["data"].get("operation") == "update_card" and record["data"]["status"] == "failed":
             return _receipt(record, no_op=True)
-        client = make_client(dict(settings), transport=transport, base=base, process=process)
+        client = _client(settings, identity, transport, base, process)
         if client.app_id() != record["data"]["expected_sender_app_id"]:
             raise MessageError("inspect requires the original application identity")
         return _receipt(_readback(store, record, client))
@@ -516,6 +548,7 @@ def parser():
     command.add_argument("--request-id", required=True)
     command.add_argument("--receive-id-type", choices=["chat_id", "open_id"], required=True)
     command.add_argument("--receive-id", required=True)
+    command.add_argument("--identity", choices=["bot", "user"], default="bot", help="Explicit user OAuth messages only; default bot")
     files = command.add_mutually_exclusive_group(required=True)
     files.add_argument("--text-file")
     files.add_argument("--card-file", help="Display-only interactive card JSON; no callbacks or forms")
@@ -554,7 +587,7 @@ def main(argv=None):
                 try:
                     if args.command == "send":
                         result = send(store, conf["publisher"], args.request_id, args.receive_id_type, args.receive_id,
-                                      args.text_file, confirm=args.confirm, card_file=args.card_file)
+                                      args.text_file, confirm=args.confirm, card_file=args.card_file, identity=args.identity)
                     elif args.command == "resolve":
                         result = resolve(store, args.action_id, absent=args.absent, reason=args.reason, confirm=args.confirm)
                     elif args.command == "update-card":
