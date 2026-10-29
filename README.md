@@ -141,13 +141,15 @@ python3 -m work_assistant publish REPORT_ID --dry-run
 
 将 `REPORT_ID` 换成导入结果的 `id`。真实使用时由用户显式指定自己的 bundle 目录和当天日期；`--timezone` 默认 `Asia/Shanghai`。可用 `--title '合成日报 · 2026-01-15 提前预览'` 覆盖展示标题（非空，最多 200 字符），默认取源 h1；覆盖只改变展示和报告哈希，不修改源文件、正文或日期发布身份。历史归档可显式指定过去日期，不能把旧执行日期冒充今天。重复示例时使用已有项目即可。源 bundle 的结构见 [合成 state](examples/daily-bundle/state.json)、[合成 evidence](examples/daily-bundle/evidence/daily-2026-01-15.json) 和 [合成 HTML](examples/daily-bundle/daily/2026-01-15.html)。
 
-bundle 根目录的 `state.json` 提供 `timezone` 以及 `daily.last_report`、`daily.last_evidence`、`daily.last_successful_execution_date`、`daily.covered_until`。两个文件路径在解析符号链接后必须仍位于 bundle 内。evidence 要求 `report_type=daily`，其 `execution_date`、state 的成功执行日期与 `--date` 三者一致；两处 timezone 与命令一致；覆盖区间起点早于终点，state/evidence 的终点字符串一致，不允许未来的终点或执行日期。区间时间戳须有时区偏移，可使用 UTC `Z`。必须提供 `validation.status=passed`，并让 `validation.report_sha256` 等于源 HTML **原始字节**的 SHA-256。缺失、过期、未通过校验、哈希不符或读取期间发生变化均明确报错，不能退回旧日报。
+bundle 根目录的 `state.json` 提供 `timezone` 以及 `daily.last_report`、`daily.last_evidence`、`daily.last_successful_execution_date`、`daily.covered_until`。两个文件路径在解析符号链接后必须仍位于 bundle 内。evidence 要求 `report_type=daily`，其 `execution_date`、state 的成功执行日期与 `--date` 三者一致；两处 timezone 与命令一致；覆盖区间起点早于终点，state/evidence 的终点字符串一致，终点转换到所选时区后的日期必须等于请求日期，不允许未来的终点或执行日期。区间时间戳须有时区偏移，可使用 UTC `Z`。必须提供 `validation.status=passed`，并让 `validation.report_sha256` 等于源 HTML **原始字节**的 SHA-256。缺失、过期、未通过校验、哈希不符或读取期间发生变化均明确报错，不能退回旧日报。
 
-HTML 使用 body 中的 h1 标题、日期／覆盖说明，以及唯一的 `id="sync-summary"` 短摘要。导入器用标准库 HTMLParser 提取正文、段落、列表与折叠 details 中的可见文字，排除 head、script、style、footer、导航和隐藏元素；不执行或复制任意源 HTML、链接和属性。重建后的 HTML 自包含且转义所有文本。卡片只包含展示标题、覆盖区间和源短摘要；外部文档只包含展示标题、覆盖区间及源正文，保留原文已有的限定条件，不追加内部 evidence 摘要、源路径、JSON 明细或技术校验说明。应用模式发布时由现有发布器添加文档按钮。本地 `evidence.html`／`evidence.json` 保留脱敏证据摘要与源提供的局限，供单独核查；源陈述在本地证据中标注 reported，源提供的 verified_at 不升级为独立测量。
+HTML 使用 body 中首个可见 h1 作为标题（后续 h1 保留为正文）、日期／覆盖说明，以及唯一的 `id="sync-summary"` 短摘要。导入器用标准库 HTMLParser 提取正文、段落、列表与折叠 details 中的可见文字，排除 head、script、style、footer、导航和隐藏元素；不执行或复制任意源 HTML、链接和属性。紧凑表格保留单元格分隔和行边界，pre 保留换行、空行和缩进；支持 p／li／表格的可选闭标签，无法可靠处理的嵌套会明确拒绝。重建后的 HTML 自包含且转义所有文本。卡片只包含展示标题、覆盖区间和源短摘要；外部文档只包含展示标题、覆盖区间及源正文，保留原文已有的限定条件，不追加内部 evidence 摘要、源路径、JSON 明细或技术校验说明。应用模式发布时由现有发布器添加文档按钮。本地 `evidence.html`／`evidence.json` 保留可安全导出的证据摘要与源提供的局限，供单独核查；源陈述在本地证据中标注 reported，源提供的 verified_at 不升级为独立测量。
 
-evidence 的 `items` 每项含 `id`、`claim`、`source_ids`，引用 `sources` 的 `id`；每个 source 含 `summary`、`verified_at`；`limitations` 为文字列表。这些相关字段脱敏后仅保留在本地证据产物，额外元数据保留在私有 journal，勿提交或直接分享 journal。标题最多 200 字符，短摘要最多 6000 字符；源摘要／结论／局限每项最多 2000 字符，证据摘要最多 64 KiB、共 1000 项；state 最多 1 MiB，源 HTML／evidence 各最多 20 MiB。完整文档超过 1000 个原生文字块时明确拒绝，不会静默截断详情。
+evidence 的 `items` 每项含 `id`、`claim`、`source_ids`，引用 `sources` 的 `id`；每个 source 含 `summary`、`verified_at`；`limitations` 为文字列表。这些相关字段仅保留在本地证据产物，额外元数据保留在私有 journal，勿提交或直接分享 journal。标题最多 200 字符，短摘要最多 6000 字符；源摘要／结论／局限每项最多 2000 字符，证据摘要最多 64 KiB、共 1000 项；state 最多 1 MiB，源 HTML／evidence 各最多 20 MiB。完整文档超过 1000 个原生文字块时明确拒绝，不会静默截断详情。
 
-同一输入字节、日期和元数据返回同一个报告 ID／哈希；已校验的同日报修订生成新快照，旧快照保持不可变。导入不收集本项目之前的任务和结论，也不推进普通 report 的收集游标。后续 `publish`／`reconcile` 继续使用现有授权、checkpoint 和未知结果规则：相同内容 no-op；同目的地＋项目＋日期的修订复用文档／消息 ID；未知结果不能因再次导入而重发。定时流程只需在原收集器结束后显式调用 import-daily，导入成功后再按既有授权发布；导入失败就回报原因。
+导入采用独立的安全导出规则，不使用通用 redact 的宽泛替换：普通数量和参数说明（例如 `max token: 4096，password=至少12位`）原样保留；可识别的本地绝对路径、明确凭证格式和凭证赋值会拒绝导出，报错只给类别，不回显敏感内容。规则不读取环境中的凭证，也不宣称可以识别所有秘密；需由源报告作者确保正文适合分享。
+
+同一输入字节、日期和元数据返回同一个报告 ID／哈希；已校验的同日报修订生成新快照，旧快照保持不可变。重复生成相同可信内容时可恢复缺失的产物，保留原报告 ID；所有尚存文件先核对哈希，发现篡改仍拒绝，不覆盖已有文件。导入不收集本项目之前的任务和结论，也不推进普通 report 的收集游标。后续 `publish`／`reconcile` 继续使用现有授权、checkpoint 和未知结果规则：相同内容 no-op；同目的地＋项目＋日期的修订复用文档／消息 ID；未知结果不能因再次导入而重发。定时流程只需在原收集器结束后显式调用 import-daily，导入成功后再按既有授权发布；导入失败就回报原因。
 
 ## 飞书预览和真实发布
 

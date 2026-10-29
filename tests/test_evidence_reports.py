@@ -111,6 +111,23 @@ class EvidenceTests(Base):
             generate_report(self.s, self.p["id"], "2026-01-15")
         self.assertEqual(self.s.db.execute("SELECT COUNT(*) FROM cursors").fetchone()[0], 0)
 
+    def test_regeneration_restores_missing_files_without_new_snapshot_or_cursor(self):
+        self.claim()
+        report = generate_report(self.s, self.p["id"], "2026-01-15")
+        root = Path(report["data"]["path"])
+        original = (root / "card.json").read_bytes()
+        cursor = self.s.db.execute("SELECT seq FROM cursors").fetchone()[0]
+        (root / "card.json").unlink()
+        restored = generate_report(self.s, self.p["id"], "2026-01-15")
+        self.assertEqual(restored, report)
+        self.assertEqual((root / "card.json").read_bytes(), original)
+        self.assertEqual(self.s.db.execute("SELECT seq FROM cursors").fetchone()[0], cursor)
+        (root / "card.json").unlink()
+        (root / "index.html").write_text("modified synthetic snapshot")
+        with self.assertRaisesRegex(ValueError, "immutable report modified"):
+            generate_report(self.s, self.p["id"], "2026-01-15")
+        self.assertFalse((root / "card.json").exists())
+
 
 class DemoTests(unittest.TestCase):
     def test_full_demo_deterministic_across_directories(self):

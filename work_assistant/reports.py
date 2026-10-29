@@ -147,6 +147,7 @@ def save_report(store, project, period, content, output=None, metadata=None):
     existing = next((r for r in store.records("report", project_id=project["id"])
                      if r["data"]["hash"] == content_hash), None)
     if existing:
+        restore_missing_report(existing, content)
         return load_report(store, existing["id"])
     base = Path(output).expanduser().resolve() if output else store.root / "reports"
     target = base / (project["id"] + "-" + period + "-" + content_hash[:16])
@@ -164,6 +165,38 @@ def save_report(store, project, period, content, output=None, metadata=None):
             os.replace(str(stage), str(target))
     return store.record("report", dict(metadata or {}, hash=content_hash, path=str(target), period=period,
         files={name: digest(text.encode("utf-8")) for name, text in content.items()}), project_id=project["id"])
+
+
+def restore_missing_report(report, content):
+    """Restore only absent files from identical regenerated content; never repair tampering."""
+    manifest = {name: digest(text.encode("utf-8")) for name, text in content.items()}
+    if manifest != report["data"]["files"]:
+        raise ValueError("immutable report manifest differs from regenerated content")
+    target = Path(report["data"]["path"])
+    if target.is_symlink() or (target.exists() and not target.is_dir()):
+        raise ValueError("immutable report modified: snapshot directory")
+    missing = []
+    # Check every extant file before writing anything, including when another file is missing.
+    for name, expected in manifest.items():
+        path = target / name
+        if path.is_symlink() or (path.exists() and (not path.is_file() or digest(path.read_bytes()) != expected)):
+            raise ValueError("immutable report modified: " + name)
+        if not path.exists():
+            missing.append(name)
+    if not missing:
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".wa-restore-", dir=str(target.parent)) as staging:
+        for name in missing:
+            staged = Path(staging) / name
+            atomic_write(staged, content[name])
+            # A hard link installs a complete file without replacing any concurrent writer.
+            try:
+                os.link(str(staged), str(target / name))
+            except FileExistsError:
+                path = target / name
+                if path.is_symlink() or not path.is_file() or digest(path.read_bytes()) != manifest[name]:
+                    raise ValueError("immutable report modified during restoration: " + name)
 
 
 def load_report(store, ident):

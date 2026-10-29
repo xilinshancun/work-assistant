@@ -1,4 +1,5 @@
 """Import an explicitly selected, validated daily bundle. No providers or network."""
+import html
 import os
 import re
 import stat
@@ -7,14 +8,50 @@ from html.parser import HTMLParser
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .reports import STYLE, document_blocks, escape, md_text, save_report
-from .util import digest, dumps, redact_data, strict_json
+from .reports import STYLE, document_blocks, save_report
+from .util import digest, dumps, outbound_guard, strict_json
 
 MAX_STATE = 1024 * 1024
 MAX_FILE = 20 * 1024 * 1024
 MAX_SUMMARY = 6000
 SCOPE = ("源报告陈述 / Reported source assertions. 导入仅核对日期、水位和文件哈希；"
          "不代表独立测量或科学复现 / not independently measured or reproduced.")
+
+
+def export_data(value):
+    """Keep source semantics intact. Reject recognizable secrets/paths, never rewrite prose.
+
+    This deliberately does not use the general-purpose redact() regex or read secrets
+    from the environment. A rejection names the category, never echoes sensitive text.
+    """
+    if type(value) is str:
+        outbound_guard(value)
+        if re.search(r"(?i)(?:file://|(?:^|[\s\"'(<])~/|[A-Z]:[\\/]|\\\\[^\s\\]+\\|"
+                     r"/(?:Users|home|private|tmp|var|etc|opt|srv|root|mnt|Volumes)/)", value):
+            raise ValueError("daily export contains a local path; remove it from the source text")
+        if re.search(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{15,})\b|"
+                     r"(?i:bearer\s+[A-Za-z0-9_./+=-]{16,}|https?://[^\s<>]*/(?:bot/v2/hook|webhook)/[^\s<>]+)", value):
+            raise ValueError("daily export contains an explicit credential; remove it from the source text")
+        # Numeric token counts and prose such as password=至少12位 are not credentials.
+        assignments = re.finditer(r"(?i)\b(?:api[_-]?key|app[_-]?secret|access[_-]?token|refresh[_-]?token|"
+                                  r"token|password|secret)[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_./+=-]{12,})", value)
+        if any(re.search(r"[A-Za-z]", match.group(1)) for match in assignments):
+            raise ValueError("daily export contains a credential assignment; remove it from the source text")
+    elif type(value) is dict:
+        for item in value.values():
+            export_data(item)
+    elif type(value) is list:
+        for item in value:
+            export_data(item)
+    return value
+
+
+def escape(value):
+    return html.escape(str(value), quote=True)
+
+
+def md_text(value):
+    return re.sub(r"([\\`*_{}\[\]()<>#!|])", r"\\\1", str(value))
 
 
 def _read(root, relative, limit):
@@ -73,27 +110,59 @@ class VisibleReport(HTMLParser):
     blocks = {"address", "article", "aside", "blockquote", "br", "dd", "details", "div",
               "dl", "dt", "figcaption", "figure", "h1", "h2", "h3", "h4", "h5", "h6",
               "header", "hr", "li", "main", "ol", "p", "pre", "section", "summary",
-              "table", "tr", "ul"}
+              "caption", "table", "tr", "ul"}
+    optional = {"p", "li", "dt", "dd", "rt", "rp", "option", "optgroup", "colgroup",
+                "thead", "tbody", "tfoot", "tr", "td", "th"}
+    p_closers = (blocks - {"br", "caption", "summary"}) | {"li", "dt", "dd", "fieldset", "form", "menu"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.stack = []
         self.body, self.summary, self.title = [], [], []
         self.summary_count = 0
+        self.title_seen = False
 
     def _active(self):
         return (any(e[0] == "body" for e in self.stack)
                 and not any(e[1] for e in self.stack))
 
-    def _append(self, text):
+    def _append(self, text, preserve=False):
         if self._active():
-            self.body.append(text)
+            self.body.append((text, preserve))
             if any(e[2] for e in self.stack):
-                self.summary.append(text)
-            if any(e[0] == "h1" for e in self.stack):
-                self.title.append(text)
+                self.summary.append((text, preserve))
+            if any(e[3] for e in self.stack):
+                self.title.append((text, preserve))
+
+    def _close(self, index):
+        if any(e[0] not in self.optional for e in self.stack[index + 1:]):
+            raise ValueError("ambiguous HTML nesting; close nonoptional elements explicitly")
+        if self.stack[index][0] in self.blocks:
+            self._append("\n")
+        del self.stack[index:]
+
+    def _implicit_close(self, targets, boundaries=()):
+        for index in range(len(self.stack) - 1, -1, -1):
+            tag = self.stack[index][0]
+            if tag in boundaries:
+                break
+            if tag in targets:
+                self._close(index)
+                break
 
     def handle_starttag(self, tag, attrs):
+        if tag in self.p_closers:
+            self._implicit_close({"p"})
+        if tag == "li":
+            self._implicit_close({"li"}, {"ul", "ol"})
+        elif tag in {"dt", "dd"}:
+            self._implicit_close({"dt", "dd"}, {"dl"})
+        elif tag in {"td", "th"}:
+            self._implicit_close({"td", "th"}, {"tr", "table"})
+        elif tag == "tr":
+            self._implicit_close({"tr"}, {"table", "thead", "tbody", "tfoot"})
+        elif tag in {"thead", "tbody", "tfoot"}:
+            self._implicit_close({"thead", "tbody", "tfoot"}, {"table"})
         attrs = {name: value or "" for name, value in attrs}
         hidden = (tag in self.excluded or "hidden" in attrs
                   or attrs.get("aria-hidden", "").lower() == "true"
@@ -103,7 +172,11 @@ class VisibleReport(HTMLParser):
         summary = attrs.get("id") == "sync-summary"
         if tag in self.blocks:
             self._append("\n")
-        self.stack.append((tag, bool(hidden), summary))
+        if tag in {"td", "th"}:
+            self._append(" | ")
+        first_title = tag == "h1" and not hidden and self._active() and not self.title_seen
+        self.title_seen = self.title_seen or first_title
+        self.stack.append((tag, bool(hidden), summary, first_title))
         if summary and self._active():
             self.summary_count += 1
         if tag in self.void:
@@ -115,26 +188,45 @@ class VisibleReport(HTMLParser):
             self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
-        if tag in self.blocks:
-            self._append("\n")
+        if tag in self.void:
+            return
         for index in range(len(self.stack) - 1, -1, -1):
             if self.stack[index][0] == tag:
-                del self.stack[index:]
-                break
+                self._close(index)
+                return
+        # An explicit optional end tag may follow an implicit close (e.g. </p>).
+        if tag not in self.optional:
+            raise ValueError("ambiguous HTML nesting; unmatched closing element")
 
     def handle_data(self, data):
-        self._append(re.sub(r"\s+", " ", data))
+        preserve = any(e[0] == "pre" for e in self.stack)
+        self._append(data.replace("\r\n", "\n").replace("\r", "\n") if preserve
+                     else re.sub(r"\s+", " ", data), preserve)
 
     @staticmethod
     def clean(parts):
-        return "\n".join(line.strip() for line in "".join(parts).splitlines() if line.strip())
+        lines, current, preserved = [], "", False
+        for text, preserve in parts:
+            pieces = text.split("\n")
+            for index, piece in enumerate(pieces):
+                current += piece
+                preserved = preserved or preserve
+                if index < len(pieces) - 1:
+                    if preserved or current.strip():
+                        lines.append(current if preserved else current.strip())
+                    current, preserved = "", False
+        if preserved or current.strip():
+            lines.append(current if preserved else current.strip())
+        return "\n".join(lines)
 
     def extract(self, raw):
         try:
             self.feed(raw.decode("utf-8"))
             self.close()
-        except (UnicodeError, ValueError):
+        except UnicodeError:
             raise ValueError("source report must be UTF-8 HTML") from None
+        if any(e[0] not in self.optional | {"html", "head", "body"} for e in self.stack):
+            raise ValueError("ambiguous HTML nesting; unclosed nonoptional elements")
         title, summary, body = (self.clean(p) for p in (self.title, self.summary, self.body))
         _text(title, "visible body h1 title", 200)
         _text(summary, "visible sync-summary", MAX_SUMMARY)
@@ -172,8 +264,8 @@ def _evidence_summary(evidence):
         item_ids.add(ident)
         selected_items.append({"id": ident, "claim": _text(item.get("claim"), "item claim"),
                                "source_ids": refs, "grade": "reported"})
-    selected = redact_data({"sources": selected_sources, "items": selected_items,
-                            "limitations": [_text(v, "limitation") for v in limitations]})
+    selected = {"sources": selected_sources, "items": selected_items,
+                "limitations": [_text(v, "limitation") for v in limitations]}
     if len(dumps(selected).encode("utf-8")) > 65536:
         raise ValueError("outgoing evidence summary exceeds 64 KiB; narrow source summaries")
     return selected
@@ -201,12 +293,13 @@ def render_import(snapshot):
                          for i in range(0, len(card_text), 1500)]}
 
     def paragraphs(text):
-        return "".join("<p>" + escape(line) + "</p>" for line in text.splitlines())
+        return "".join("<p class='source-line'>" + escape(line) + "</p>" for line in text.split("\n"))
 
     def page(text):
         return ("<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
                 "<meta name='viewport' content='width=device-width,initial-scale=1'><title>"
-                + escape(title) + "</title><style>" + STYLE + "</style></head><body><main>"
+                + escape(title) + "</title><style>" + STYLE
+                + ".source-line{white-space:pre-wrap}</style></head><body><main>"
                 + text + "</main></body></html>")
 
     header = "<header><h1>" + escape(title) + "</h1><p>" + escape(interval) + "</p></header>"
@@ -261,6 +354,8 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
             raise ValueError("state/evidence covered_until watermark mismatch")
         if end > datetime.now(timezone.utc) or requested > datetime.now(zone).date():
             raise ValueError("future cutoff or execution date refused")
+        if end.astimezone(zone).date() != requested:
+            raise ValueError("covered_until date in requested timezone must match requested date")
         validation = evidence.get("validation")
         if type(validation) is not dict or validation.get("status") != "passed":
             raise ValueError("source validation.status must be passed")
@@ -269,7 +364,7 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
         source_title, summary, body = VisibleReport().extract(report_raw)
         coverage = {"covered_from": evidence["covered_from"], "covered_until": evidence["covered_until"]}
         selected = _evidence_summary(evidence)
-        snapshot = redact_data({"schema": "wa.report.v1", "origin": "external_daily_import",
+        snapshot = export_data({"schema": "wa.report.v1", "origin": "external_daily_import",
             "project": p["name"], "project_id": p["id"], "date": period, "timezone": timezone_name,
             "source_hashes": {"report": digest(report_raw), "evidence": digest(evidence_raw), "state": digest(state_raw)},
             "coverage": coverage, "title": source_title if title is None else title,

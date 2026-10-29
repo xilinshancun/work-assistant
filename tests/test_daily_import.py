@@ -1,6 +1,7 @@
 """Entirely synthetic local bundles and injected HTTP protocol fixtures."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -65,7 +66,7 @@ class DailyImportTests(Base):
             "validation": {"status": "passed", "report_sha256": ""},
             "items": [{"id": "i1", "claim": "十个合成样本；仅为源陈述", "source_ids": ["s1"],
                        "private_extra": "private-item-metadata", "grade": "measured"}],
-            "sources": [{"id": "s1", "summary": "合成日志摘要 token=synthetic-private-secret",
+            "sources": [{"id": "s1", "summary": "合成日志摘要，包含格式检查结果",
                          "verified_at": "2026-01-15T17:00:00+08:00", "extra": "private-source-metadata"}],
             "limitations": ["尚未独立复现，仅适用合成测试。"], "extra": {"opaque": "private-top-metadata"}}
         self.state = {"timezone": "Asia/Shanghai", "daily": {"last_successful_execution_date": PERIOD,
@@ -88,6 +89,127 @@ class DailyImportTests(Base):
     def files(self, record):
         return {p.name: p.read_text(encoding="utf-8") for p in Path(record["data"]["path"]).iterdir()}
 
+    def document_text(self, record):
+        blocks = preview(self.s, record["id"])["document"]["children"]
+        return "\n".join(b["text"]["elements"][0]["text_run"]["content"] for b in blocks)
+
+    def test_compact_table_preserves_caption_cells_and_rows(self):
+        table = "<table><caption>样本计数</caption><tr><th>A<th>B<tr><td>10<td>20</table>"
+        self.write_bundle(HTML.replace("<h2>详细结果</h2>", table))
+        report = self.load()
+        body = json.loads(self.files(report)["evidence.json"])["body"]
+        self.assertIn("样本计数\n| A | B\n| 10 | 20", body)
+        self.assertIn("| A | B\n| 10 | 20", self.document_text(report))
+        self.assertNotIn("1020", body)
+
+    def test_optional_hidden_paragraph_and_list_end_tags_keep_visible_qualifications(self):
+        examples = ["<p hidden>不应显示<p>限定：尚未独立复现。",
+                    "<ul><li hidden>不应显示<li>限定：尚未独立复现。</ul>",
+                    "<p hidden>不应显示<br>仍不应显示<p>限定：尚未独立复现。"]
+        for fragment in examples:
+            with self.subTest(fragment=fragment):
+                self.write_bundle(HTML.replace("<h2>详细结果</h2>", fragment))
+                text = self.document_text(self.load())
+                self.assertIn("限定：尚未独立复现。", text)
+                self.assertNotIn("不应显示", text)
+
+    def test_ambiguous_unclosed_hidden_container_is_rejected(self):
+        for fragment in ("<div hidden>隐私<p>限定仍可见", "<p hidden><span>隐私<p>限定仍可见"):
+            with self.subTest(fragment=fragment):
+                self.write_bundle("<body><h1>测试</h1><section id='sync-summary'>摘要</section><section>"
+                                  + fragment + "</section></body>")
+                with self.assertRaisesRegex(ValueError, "ambiguous HTML nesting"):
+                    self.load()
+
+    def test_cutoff_local_date_must_equal_requested_historical_date(self):
+        self.evidence["covered_until"] = "2026-01-15T16:30:00Z"  # Jan 16 in Asia/Shanghai.
+        self.state["daily"]["covered_until"] = self.evidence["covered_until"]
+        self.write_metadata()
+        with self.assertRaisesRegex(ValueError, "covered_until date"):
+            self.load()
+        self.evidence["covered_until"] = "2026-01-14T16:30:00Z"  # Jan 15 in Asia/Shanghai.
+        self.state["daily"]["covered_until"] = self.evidence["covered_until"]
+        self.write_metadata()
+        self.assertEqual(self.load()["data"]["period"], PERIOD)
+
+    def test_parameter_prose_preserved_without_generic_redaction(self):
+        phrase = "上下文 max token: 4096，password=至少12位"
+        detail = "max_tokens=8192；token: 123456789012；password 参数名不代表密码值。"
+        self.evidence["items"][0]["claim"] = phrase
+        self.write_bundle(HTML.replace("今日摘要", "&apos;" + phrase + "&apos;")
+                          .replace("<h2>详细结果</h2>", "<p>" + detail + "</p>"))
+        report = self.load(title=phrase)
+        files = self.files(report)
+        snapshot = json.loads(files["evidence.json"])
+        self.assertIn("'" + phrase + "'", snapshot["body"])
+        self.assertIn(detail, snapshot["body"])
+        self.assertIn(phrase, self.document_text(report))
+        self.assertIn(detail, self.document_text(report))
+        self.assertEqual(snapshot["evidence"]["items"][0]["claim"], phrase)
+        self.assertIn(phrase, json.loads(files["card.json"])["header"]["title"]["content"])
+        for name in ("index.html", "evidence.html", "card-preview.html", "daily-sync.md"):
+            self.assertIn(phrase, files[name])
+
+    def test_import_rejects_explicit_secrets_and_local_paths_without_echoing(self):
+        sensitive = ["token=synthetic-test-credential", "password=synthetic-password-123",
+                     "sk-synthetic_fixture_key_123", "Bearer synthetic_access_123456",
+                     "https://example.invalid/webhook/synthetic-id", "/Users/synthetic/private/report.json",
+                     "file:///tmp/synthetic-report.json", "C:\\synthetic\\private.json"]
+        for text in sensitive:
+            with self.subTest(text=text):
+                self.write_bundle(HTML.replace("今日摘要", text))
+                with self.assertRaisesRegex(ValueError, "daily export contains") as error:
+                    self.load()
+                self.assertNotIn(text, str(error.exception))
+        self.write_bundle()
+        self.evidence["sources"][0]["summary"] = "token=synthetic-private-secret"
+        self.write_metadata()
+        with self.assertRaisesRegex(ValueError, "credential assignment"):
+            self.load()
+        self.assertEqual(self.s.records("report"), [])
+
+    def test_pre_preserves_newlines_indentation_and_blank_lines(self):
+        pre = "epoch 1\n  loss 0.20\n\n  loss 0.10"
+        self.write_bundle(HTML.replace("<h2>详细结果</h2>", "<pre>" + pre + "</pre>"))
+        report = self.load()
+        files = self.files(report)
+        self.assertIn(pre, json.loads(files["evidence.json"])["body"])
+        # Document blocks preserve the blank line as a space-only native text block.
+        self.assertIn("epoch 1\n  loss 0.20\n \n  loss 0.10", self.document_text(report))
+        self.assertIn("<p class='source-line'>  loss 0.20</p>", files["index.html"])
+        self.assertIn("white-space:pre-wrap", files["index.html"])
+
+    def test_first_visible_h1_only_is_title_later_h1_remains_body(self):
+        self.write_bundle(HTML.replace("<header><h1>", "<header><h1 hidden>隐藏标题</h1><h1>")
+                          .replace("<h2>详细结果</h2>", "<h1>第二章节标题</h1>"))
+        report = self.load()
+        payload = preview(self.s, report["id"])
+        self.assertEqual(payload["document"]["title"], "合成项目 · 每日进展")
+        self.assertEqual(payload["card"]["header"]["title"]["content"], "合成项目 · 每日进展")
+        self.assertIn("第二章节标题", self.document_text(report))
+        self.assertNotIn("隐藏标题", self.document_text(report))
+
+    def test_identical_import_restores_missing_files_but_never_tampering(self):
+        report = self.load()
+        before = self.files(report)
+        directory = Path(report["data"]["path"])
+        (directory / "card.json").unlink()
+        (directory / "document.json").unlink()
+        with self.assertRaisesRegex(ValueError, "immutable report"):
+            load_report(self.s, report["id"])
+        self.assertEqual(self.load()["id"], report["id"])
+        self.assertEqual(self.files(report), before)
+        shutil.rmtree(directory)
+        self.assertEqual(self.load()["id"], report["id"])
+        self.assertEqual(self.files(report), before)
+        (directory / "card.json").unlink()
+        (directory / "document.json").write_text("tampered")
+        with self.assertRaisesRegex(ValueError, "immutable report modified"):
+            self.load()
+        self.assertFalse((directory / "card.json").exists())
+        self.assertEqual((directory / "document.json").read_text(), "tampered")
+        self.assertEqual(len(self.s.records("report")), 1)
+
     def test_summary_full_report_qualifications_and_private_metadata(self):
         before = {p: p.read_bytes() for p in (self.state_path, self.report_path, self.evidence_path)}
         report = self.load()
@@ -108,7 +230,7 @@ class DailyImportTests(Base):
             self.assertNotIn(forbidden, text)
             self.assertNotIn(forbidden, dumps(card))
         self.assertIn("十个合成样本；仅为源陈述", files["evidence.html"])
-        self.assertIn("[REDACTED]", files["evidence.json"])
+        self.assertIn("合成日志摘要", files["evidence.json"])
         self.assertIn(daily_import.SCOPE, files["evidence.html"])
         self.assertIn("&lt;unsafe&gt;", files["index.html"])
         for raw in files.values():
@@ -165,6 +287,8 @@ class DailyImportTests(Base):
         self.load()
         self.state["daily"]["last_successful_execution_date"] = "2026-01-16"
         self.evidence["execution_date"] = "2026-01-16"
+        self.evidence["covered_until"] = "2026-01-16T17:30:00+08:00"
+        self.state["daily"]["covered_until"] = self.evidence["covered_until"]
         self.evidence["items"][0]["claim"] = "下一日的新结论"
         self.write_bundle(HTML.replace("第一条中文详情", "次日详情"))
         record = self.load("2026-01-16")

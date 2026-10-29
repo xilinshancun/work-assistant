@@ -137,18 +137,24 @@ without API calls. Offline FakeCLI tests are protocol fixtures, not live proof.
 `import-daily PROJECT --source-root ROOT --date YYYY-MM-DD [--timezone Asia/Shanghai] [--title TITLE]`
 imports an explicitly selected, validated local bundle without collecting, scheduling,
 calling models, or publishing. It verifies date/timezone/watermark agreement, aware
-nonfuture coverage, original HTML SHA-256 and validation status; bounded reads stay
+nonfuture coverage with cutoff date matching the requested date in the selected zone, original HTML SHA-256 and validation status; bounded reads stay
 inside ROOT after symlink resolution, and all inputs are re-read before committing.
 HTMLParser extracts the body title, unique sync-summary and complete readable body
-without active markup/navigation. Seven escaped standard outputs and an ordinary
+without active markup/navigation. Table cell/row boundaries and preformatted lines are
+preserved; optional paragraph/list/table end tags are handled, and ambiguous nesting
+is rejected. Only the first visible h1 supplies the title. Seven escaped standard outputs and an ordinary
 immutable report record reuse the existing publisher identity/checkpoints. External documents contain only display title, coverage and source body with its
 original qualifications; cards contain title, coverage and summary. Internal evidence
 and technical verification notes remain in local evidence.html/json only. Evidence
-summaries are bounded, redacted and attributed as reported; extra metadata stays in
+summaries are bounded and attributed as reported; import-specific export checks
+reject recognizable credentials/local paths without rewriting ordinary parameter
+prose or reading environment secrets. The shared redact behavior is unchanged; extra metadata stays in
 the private journal. The optional nonempty title override is bounded to 200 characters,
 changes the report hash and display only, and preserves source bytes and period identity. Imports contain only that source bundle, leave normal collection
 cursors untouched, reject documents above 1000 blocks without truncation, and retain
-deterministic no-op / same-period update behavior. Synthetic examples live under
+deterministic no-op / same-period update behavior. Identical trusted regeneration
+can restore missing snapshot files under the same report ID, after verifying all
+extant files; modified files are always rejected and never replaced. Synthetic examples live under
 examples/daily-bundle; no personal source paths or business data are tracked.
 
 Claude architect supplies the plan; Codex implementation worker owns main branch in its assigned worktree. A second Codex worker independently implements only policy.py and policy tests in a separate worktree using the exact pure interface above, to compare the critical permission boundary. Claude reviewer evaluates both and reviews the integrated implementation. Root integrates, validates live adapters, and handles authorized public GitHub creation/push after checks. No worker creates remote repositories or sends external messages.
