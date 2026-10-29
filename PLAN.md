@@ -177,7 +177,10 @@ local paths are checked after bounded percent decoding, without changing URL tex
 blocks including coverage, 10000 characters/1000 runs per block; reject overflow.
 Safe absolute HTTP(S) anchors preserve native link.url with official whole-URL
 encoding and combined inline styles. Relative/local/unsafe schemes retain labels
-only; raw href credentials/local paths are checked before encoding. Maximum URL
+only; raw href credentials/local paths are checked before encoding. Localhost/suffix
+local names, single-label hosts and non-global/multicast IP targets retain labels
+only, using hostname/ipaddress checks without DNS. Ordinary dotted hostnames are
+not guessed to be internal. Userinfo and malformed ports remain rejected. Maximum URL
 length is 8192 characters. Local previews retain clickable safe links and reproduce
 the native structure without executing source markup. Internal evidence
 and technical verification notes remain in local evidence.html/json only. Evidence

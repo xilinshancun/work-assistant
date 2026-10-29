@@ -147,7 +147,7 @@ HTML 使用 body 中首个可见 h1 提供默认展示标题，并要求唯一�
 
 固定模板的一次性调用／wrapper 配置方法：在现有 `import-daily PROJECT --source-root ROOT --date YYYY-MM-DD` 参数后追加 `--body-scope main`；未明确核验 main 的未知模板继续使用默认 strict。此前已生成的不可变快照不改写；scope 变化会产生新的报告哈希。
 
-正文 a 标签仅对安全的绝对 HTTP(S) 目标生成原生 `text_run.text_element_style.link.url`（按官方 schema 对完整 URL 编码），支持与 bold／italic 等组合。本地预览也可点击这些链接；相对／本地导航和 javascript 等目标仅保留标签文字，不生成外链。原始 href 先通过凭证／本地路径检查，含敏感 query／fragment、userinfo 或非法控制字符的 HTTP 链接拒绝且诊断不回显 URL；每条 HTTP 链接最多 8192 字符。
+正文 a 标签仅对安全的绝对 HTTP(S) 目标生成原生 `text_run.text_element_style.link.url`（按官方 schema 对完整 URL 编码），支持与 bold／italic 等组合。本地预览也可点击这些链接；相对／本地导航和 javascript 等目标仅保留标签文字，不生成外链。链接目标也只保留标签、不输出地址的情况包括 localhost／*.localhost、.local／.internal、单标签主机，以及由 ipaddress 识别的非公网或组播 IP（含 loopback、私网、link-local、IPv4-mapped IPv6）；大小写、尾部点和端口不绕过检查。不做 DNS 查询，普通多标签域名是否在使用者内网中无法据此判断，不会猜测。原始 href 先通过凭证／本地路径检查，含敏感 query／fragment、userinfo 或非法控制字符的 HTTP 链接拒绝且诊断不回显 URL；每条 HTTP 链接最多 8192 字符。
 
 卡片保留蓝标题，从摘要首个内容段取 lead（跳过 Sync 精简版等标题），安全转义后用 lark_md 加粗；hr 后的其余原段落各占独立 bullet div（默认 plain_text；有删除线时使用安全转义的 lark_md 保留删除语义），底部灰色 note 显示“工作助理 · 项目名 · 截至 MM-DD HH:MM”。不从无依据数据生成重点、不截断原文。远端文档 ID 在发布时才可知，发布器负责在最终 note 前插入 type=default 的描边文档按钮；本地 card-preview.html 展示对应描边按钮，不伪造远端 URL。index.html 和卡片预览展示真实 heading／bullet／bold／italic 结构，全部文字转义、自包含。内部证据、源路径、JSON 明细和技术校验说明不会追加到远端文档／卡片；本地 evidence.html／json 留作单独核查。
 

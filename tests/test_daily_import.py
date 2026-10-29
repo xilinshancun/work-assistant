@@ -285,6 +285,51 @@ class DailyImportTests(Base):
                     self.load()
                 self.assertNotIn(href, str(error.exception))
 
+    def test_native_http_links_local_and_private_targets_keep_only_labels_without_dns(self):
+        urls = ["http://localhost:8080/a", "https://api.localhost./a", "http://LOCALHOST./",
+                "https://host.local/a", "https://build.internal:8443/a", "https://build:443/a",
+                "https://node.local./a", "http://127.0.0.1:9000/a", "http://10.0.0.2/a",
+                "http://172.16.0.1/a", "http://192.168.1.2/a", "http://169.254.169.254/a",
+                "http://0.0.0.0/a", "http://224.0.0.1/a", "http://[::1]:8000/a",
+                "http://[fc00::1]/a", "http://[fe80::1%25en0]/a", "http://[::ffff:127.0.0.1]/a",
+                "http://[::ffff:192.168.1.1]/a", "http://127.1/a", "http://2130706433/a",
+                "http://0x7f.0.0.1/a", "http://%6cocalhost/a"]
+        fragment = "<ul>" + "".join('<li><a href="%s"><strong>合成标签 %s</strong></a>：未完成。</li>' % (url, i)
+                                     for i, url in enumerate(urls)) + "</ul>"
+        self.write_bundle(HTML.replace("<h2>详细结果</h2>", fragment))
+        with patch("socket.getaddrinfo", side_effect=AssertionError("DNS must not be used")):
+            for url in urls:
+                self.assertIsNone(daily_import.http_link(url), url)
+            report = self.load()
+        document = self.files(report)["document.json"]
+        self.assertNotIn('"link"', document)
+        text = self.document_text(report)
+        for i, url in enumerate(urls):
+            self.assertIn("合成标签 %s：未完成。" % i, text)
+            self.assertNotIn(url, document)
+            self.assertNotIn(url, self.files(report)["index.html"])
+        self.assertIn("<strong>合成标签 0</strong>", self.files(report)["index.html"])
+
+    def test_native_http_links_public_hosts_ports_and_ipv6_remain_clickable_without_dns(self):
+        urls = ["https://github.com/synthetic-org/synthetic-repo/pull/1",
+                "https://github.com:443/synthetic-org/synthetic-repo/pull/2",
+                "https://localhost.example.com/a", "https://git.corp.example/a",
+                "http://8.8.8.8:80/a", "https://[2606:4700:4700::1111]:443/a"]
+        with patch("socket.getaddrinfo", side_effect=AssertionError("DNS must not be used")):
+            for url in urls:
+                with self.subTest(url=url):
+                    self.assertEqual(unquote(daily_import.http_link(url)["url"]), url)
+
+    def test_native_http_links_reject_userinfo_bad_ports_and_malformed_ipv6_without_echo(self):
+        urls = ["https://synthetic-user:synthetic-password@github.com/a", "http://user@localhost/a",
+                "https://github.com:invalid/a", "https://github.com:65536/a", "http://[::1]:bad/a",
+                "http://[not-ipv6]/a", "http://[::1/a"]
+        for url in urls:
+            with self.subTest(url=url):
+                with self.assertRaises(ValueError) as error:
+                    daily_import.http_link(url)
+                self.assertNotIn(url, str(error.exception))
+
     def test_native_preserves_article_header_later_h1_and_h4_to_h6(self):
         fragment = ("<article><header><p>PR 状态：尚未完成。</p></header><p>限定：未独立复现。</p></article>"
                     "<h1>后续章节</h1><h4>四级标题</h4><h5>五级标题</h5><h6>六级标题</h6>")
