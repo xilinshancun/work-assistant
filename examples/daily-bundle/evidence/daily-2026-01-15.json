@@ -1,0 +1,33 @@
+{
+  "report_type": "daily",
+  "execution_date": "2026-01-15",
+  "timezone": "Asia/Shanghai",
+  "covered_from": "2026-01-14T17:30:00+08:00",
+  "covered_until": "2026-01-15T17:30:00+08:00",
+  "validation": {
+    "status": "passed",
+    "report_sha256": "5159b0d2772d221ce28ebf0a4caa2d37da537e706efcb96496e5e998f9598705"
+  },
+  "items": [
+    {
+      "id": "synthetic-check",
+      "claim": "源报告称十个合成样本通过格式检查，尚未独立复现。",
+      "source_ids": [
+        "synthetic-log"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "id": "synthetic-log",
+      "summary": "纯合成测试记录；不是实际实验结果。",
+      "verified_at": "2026-01-15T17:25:00+08:00",
+      "extra_metadata": {
+        "fixture": true
+      }
+    }
+  ],
+  "limitations": [
+    "没有调用真实服务，不能据此推断线上效果。"
+  ]
+}

@@ -130,33 +130,73 @@ def generate_report(store, project, period, output=None, renderer=render):
                 except UnicodeError:
                     item["data"]["observation_preview"] = "binary artifact; exact bytes retained privately"
             content = renderer(outbound)
-            for text in content.values():
-                outbound_guard(text)
-            expected = {"index.html", "daily-sync.md", "evidence.html", "evidence.json", "card.json", "document.json", "card-preview.html"}
-            if set(content) != expected:
-                raise ValueError("renderer did not produce all report outputs")
-            content_hash = digest(content)
-            existing = next((r for r in store.records("report", project_id=p["id"]) if r["data"]["hash"] == content_hash), None)
-            if existing and all(Path(existing["data"]["path"], n).is_file() for n in expected):
-                return load_report(store, existing["id"])
-            base = Path(output).expanduser().resolve() if output else store.root / "reports"
-            target = base / (p["id"] + "-" + period + "-" + content_hash[:16])
-            if target.exists():
-                for name, text in content.items():
-                    if not (target / name).is_file() or (target / name).read_text(encoding="utf-8") != text:
-                        raise ValueError("existing snapshot is incomplete or modified")
-            else:
-                base.mkdir(parents=True, exist_ok=True)
-                with tempfile.TemporaryDirectory(prefix=".wa-report-", dir=str(base)) as staging:
-                    stage = Path(staging) / "snapshot"
-                    stage.mkdir()
-                    for name, text in content.items():
-                        atomic_write(stage / name, text)
-                    os.replace(str(stage), str(target))
-            record = store.record("report", {"hash": content_hash, "path": str(target), "period": period,
-                "cutoff": cutoff, "files": {name: digest(text.encode("utf-8")) for name, text in content.items()}}, project_id=p["id"])
-            store.db.execute("INSERT INTO cursors VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET seq=excluded.seq", (p["id"], cutoff))
+            record = save_report(store, p, period, content, output, {"cutoff": cutoff})
+            if record["seq"] > cutoff:
+                store.db.execute("INSERT INTO cursors VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET seq=excluded.seq", (p["id"], cutoff))
             return record
+
+
+def save_report(store, project, period, content, output=None, metadata=None):
+    """Save the standard immutable bundle inside the caller's report lock/transaction."""
+    for text in content.values():
+        outbound_guard(text)
+    expected = {"index.html", "daily-sync.md", "evidence.html", "evidence.json", "card.json", "document.json", "card-preview.html"}
+    if set(content) != expected:
+        raise ValueError("renderer did not produce all report outputs")
+    content_hash = digest(content)
+    existing = next((r for r in store.records("report", project_id=project["id"])
+                     if r["data"]["hash"] == content_hash), None)
+    if existing:
+        restore_missing_report(existing, content)
+        return load_report(store, existing["id"])
+    base = Path(output).expanduser().resolve() if output else store.root / "reports"
+    target = base / (project["id"] + "-" + period + "-" + content_hash[:16])
+    if target.exists():
+        for name, text in content.items():
+            if not (target / name).is_file() or (target / name).read_text(encoding="utf-8") != text:
+                raise ValueError("existing snapshot is incomplete or modified")
+    else:
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".wa-report-", dir=str(base)) as staging:
+            stage = Path(staging) / "snapshot"
+            stage.mkdir()
+            for name, text in content.items():
+                atomic_write(stage / name, text)
+            os.replace(str(stage), str(target))
+    return store.record("report", dict(metadata or {}, hash=content_hash, path=str(target), period=period,
+        files={name: digest(text.encode("utf-8")) for name, text in content.items()}), project_id=project["id"])
+
+
+def restore_missing_report(report, content):
+    """Restore only absent files from identical regenerated content; never repair tampering."""
+    manifest = {name: digest(text.encode("utf-8")) for name, text in content.items()}
+    if manifest != report["data"]["files"]:
+        raise ValueError("immutable report manifest differs from regenerated content")
+    target = Path(report["data"]["path"])
+    if target.is_symlink() or (target.exists() and not target.is_dir()):
+        raise ValueError("immutable report modified: snapshot directory")
+    missing = []
+    # Check every extant file before writing anything, including when another file is missing.
+    for name, expected in manifest.items():
+        path = target / name
+        if path.is_symlink() or (path.exists() and (not path.is_file() or digest(path.read_bytes()) != expected)):
+            raise ValueError("immutable report modified: " + name)
+        if not path.exists():
+            missing.append(name)
+    if not missing:
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".wa-restore-", dir=str(target.parent)) as staging:
+        for name in missing:
+            staged = Path(staging) / name
+            atomic_write(staged, content[name])
+            # A hard link installs a complete file without replacing any concurrent writer.
+            try:
+                os.link(str(staged), str(target / name))
+            except FileExistsError:
+                path = target / name
+                if path.is_symlink() or not path.is_file() or digest(path.read_bytes()) != manifest[name]:
+                    raise ValueError("immutable report modified during restoration: " + name)
 
 
 def load_report(store, ident):

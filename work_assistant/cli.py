@@ -11,6 +11,7 @@ from .routing import route_task
 from .runner import run_task
 from .evidence import add_evidence, add_claim, change_claim, ingest
 from .reports import generate_report
+from .daily_import import import_daily
 from .feishu import preview, publish, reconcile
 from .demo import demo
 from .assistant import ask_task
@@ -87,6 +88,12 @@ def parser():
     a.add_argument("project")
     a.add_argument("--date", required=True)
     a.add_argument("--output")
+    a = commands.add_parser("import-daily", help="Import a validated local daily bundle without sending")
+    a.add_argument("project")
+    a.add_argument("--source-root", required=True)
+    a.add_argument("--date", required=True)
+    a.add_argument("--timezone", default="Asia/Shanghai")
+    a.add_argument("--title", help="Override display title (nonempty, max 200 characters)")
     a = commands.add_parser("publish")
     a.add_argument("id")
     modes = a.add_mutually_exclusive_group()
@@ -133,6 +140,8 @@ def dispatch(args, conf, store):
         return change_claim(store, args.id, args.operation, args.reason, getattr(args, "replacement", None))
     if c == "report":
         return generate_report(store, args.project, args.date, args.output)
+    if c == "import-daily":
+        return import_daily(store, args.project, args.source_root, args.date, args.timezone, title=args.title)
     if c == "publish":
         if args.dry_run or (not args.confirm and not conf["publisher"].get("grants")):
             return preview(store, args.id)

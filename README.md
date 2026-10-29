@@ -128,6 +128,33 @@ python3 -m work_assistant publish REPORT_ID --dry-run
 
 `evidence ingest` 只读取配置 `ingest_paths` 中列出的精确文件，不改其他项目的源数据。报告基于有上限的一致性快照，当前实现每个快照最多 1000 条任务/结论/更正/证据，原始文件每份最多 20 MiB，观测预览最多 32 KiB。所有已知事实按新到旧排列；日期是报告归档周期，既有任务与跨周期更正继续显示，并非只截取当天事件。游标记录成功快照的收集边界；新快照保留完整的当前事实和更正，旧快照不可变。文件全部写好后才提交快照/游标；发布失败不影响收集。没有来源的责任人、截止期或承诺不会被自动添加。
 
+## 导入已有的本地日报
+
+已有收集器可继续生成自己的日报，使用 `import-daily` 将一个显式指定的 bundle 导入当前项目。此命令只生成普通的不可变 report，不调用模型、不联网、不发送消息，不修改源文件，也不创建或调整 schedule。下面是仓库内的纯合成示例，可直接离线运行：
+
+```sh
+python3 -m work_assistant init
+python3 -m work_assistant project add imported-demo --workspace .
+python3 -m work_assistant import-daily imported-demo --source-root examples/daily-bundle --date 2026-01-15 --timezone Asia/Shanghai
+python3 -m work_assistant publish REPORT_ID --dry-run
+```
+
+将 `REPORT_ID` 换成导入结果的 `id`。真实使用时由用户显式指定自己的 bundle 目录和当天日期；`--timezone` 默认 `Asia/Shanghai`。可用 `--title '合成日报 · 2026-01-15 提前预览'` 覆盖展示标题（非空，最多 200 字符），默认取源 h1；覆盖只改变展示和报告哈希，不修改源文件、正文或日期发布身份。历史归档可显式指定过去日期，不能把旧执行日期冒充今天。重复示例时使用已有项目即可。源 bundle 的结构见 [合成 state](examples/daily-bundle/state.json)、[合成 evidence](examples/daily-bundle/evidence/daily-2026-01-15.json) 和 [合成 HTML](examples/daily-bundle/daily/2026-01-15.html)。
+
+bundle 根目录的 `state.json` 提供 `timezone` 以及 `daily.last_report`、`daily.last_evidence`、`daily.last_successful_execution_date`、`daily.covered_until`。两个文件路径在解析符号链接后必须仍位于 bundle 内。evidence 要求 `report_type=daily`，其 `execution_date` 或 `report_date` 至少提供一个，所有已提供的日期、state 的成功执行日期与 `--date` 必须一致；别名同时存在时不允许冲突，不会向源补写字段；两处 timezone 与命令一致；覆盖区间起点早于终点，state/evidence 的终点字符串一致，终点转换到所选时区后的日期必须等于请求日期，不允许未来的终点或执行日期。区间时间戳须有时区偏移，可使用 UTC `Z`。必须提供 `validation.status=passed`，并让 `validation.report_sha256` 等于源 HTML **原始字节**的 SHA-256。缺失、过期、未通过校验、哈希不符或读取期间发生变化均明确报错，不能退回旧日报。
+
+HTML 使用 body 中首个可见 h1 提供默认展示标题，并要求唯一的 `id="sync-summary"` 和唯一的可见 `main`。外部文档只从 main 提取正文：正式标题仅放 document 元数据；正文先生成一行按所选时区格式化的人可读覆盖区间，排除源 header／h1／导航及其重复覆盖和提示。h2 → 原生 heading2（block_type 4）、h3 → heading3（5）、普通 p → text（2）、li 和摘要内的 p → bullet（12）；details 的 summary → heading2，折叠正文保留。strong／b、em／i 分别写入原生 text_run.text_element_style.bold／italic，原文限定逐字保留，不调用模型重写。紧凑表格保留单元格／行边界，pre 保留行结构；支持可选闭标签，歧义嵌套明确拒绝。原始可见 body 和 summary 另存本地证据快照，便于对照。
+
+卡片保留蓝标题，从摘要首个内容段取 lead（跳过 Sync 精简版等标题），安全转义后用 lark_md 加粗；hr 后的其余原段落各占独立 plain_text bullet div，底部灰色 note 显示“工作助理 · 项目名 · 截至 MM-DD HH:MM”。不从无依据数据生成重点、不截断原文。远端文档 ID 在发布时才可知，发布器负责在最终 note 前插入 type=default 的描边文档按钮；本地 card-preview.html 展示对应描边按钮，不伪造远端 URL。index.html 和卡片预览展示真实 heading／bullet／bold／italic 结构，全部文字转义、自包含。内部证据、源路径、JSON 明细和技术校验说明不会追加到远端文档／卡片；本地 evidence.html／json 留作单独核查。
+
+原生字段依据[官方 Docx SDK 模型](https://github.com/larksuite/oapi-sdk-go/blob/v3_main/service/docx/v1/model.go)及[创建块 API](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/create)，卡片依据[官方 Markdown 转义规则](https://open.feishu.cn/document/common-capabilities/message-card/message-cards-content/using-markdown-tags)和[按钮／分隔线／备注示例](https://open.feishu.cn/document/common-capabilities/message-card/add-card-interaction/interactive-components/button?lang=zh-CN)。原生文档更新需要支持 typed blocks 的发布器；旧的仅 text 发布器不能作为 heading／bullet 的发布验收。
+
+evidence 的 `items` 可缺省为空列表；提供时每项含 `id`、`claim`、`source_ids`，引用 `sources` 的 `id`。也支持 `source_mapping` 对象，形如 `{"progress":["s_build","s_test"],"support":["s_scope"]}`，其 section 为非空字符串，值为引用已有 source ID 的非空字符串数组；本地保留原映射并标为 reported，不生成业务 claim，远端不追加映射。映射也可引用 `pr_observations` 列表中的 ID：每项必须有非空 `id`、`verified_at`，与 sources 合并为可引用 ID 域，任一集合内或两集合间重名均拒绝，未知引用仍拒绝。本地证据以 kind 区分 source 与 pr_observation，PR 仅选取 id／kind／verified_at，不生成摘要或 claim；完整 URL、作者、状态、review、checks、note、verification_history 等原始字段保留在私有 journal，远端不追加。每个普通 source 的 `id` 必需，引用完整性照常校验；`verified_at` 缺省时本地明确显示“源未提供验证时间 / Not supplied”，不补造日期，字段存在时仍须是非空且最多 100 字符的文字。普通 sources 一律标为 reported，用户后续指令来源不会变成已完成业务成果；PR observations 的 `verified_at` 仍必需。`summary` 缺省时本地显示“源未提供摘要 / No source summary supplied”，不从 facts、limits 或 note 推造摘要，原始字段留在私有元数据；summary 存在时仍严格校验文字。`limitations` 为文字列表。这些相关字段仅保留在本地证据产物，额外元数据保留在私有 journal，勿提交或直接分享 journal。标题最多 200 字符，短摘要最多 6000 字符；源摘要／结论／局限每项最多 2000 字符，证据摘要最多 64 KiB、共 1000 项；state 最多 1 MiB，源 HTML／evidence 各最多 20 MiB。原生文档最多 1000 块（含覆盖行）；每块最多 10000 个字符／1000 个 text runs。超过限值明确拒绝，不拆分语义段、不静默截断详情。
+
+导入采用独立的安全导出规则，不使用通用 redact 的宽泛替换：普通数量和参数说明（例如 `max token: 4096，password=至少12位`）原样保留；路径检查会先忽略明确的 HTTP(S) URL（只用于检查，不修改输出）；Windows 驱动检测要求词边界。可识别的本地绝对路径、明确凭证格式和凭证赋值会拒绝导出，报错只给类别，不回显敏感内容。规则不读取环境中的凭证，也不宣称可以识别所有秘密；需由源报告作者确保正文适合分享。
+
+同一输入字节、日期和元数据返回同一个报告 ID／哈希；已校验的同日报修订生成新快照，旧快照保持不可变。重复生成相同可信内容时可恢复缺失的产物，保留原报告 ID；所有尚存文件先核对哈希，发现篡改仍拒绝，不覆盖已有文件。导入不收集本项目之前的任务和结论，也不推进普通 report 的收集游标。后续 `publish`／`reconcile` 继续使用现有授权、checkpoint 和未知结果规则：相同内容 no-op；同目的地＋项目＋日期的修订复用文档／消息 ID；未知结果不能因再次导入而重发。定时流程只需在原收集器结束后显式调用 import-daily，导入成功后再按既有授权发布；导入失败就回报原因。
+
 ## 飞书预览和真实发布
 
 dry-run 不需要凭证也不联网。真实自建应用模式需要设置配置所引用的 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_RECEIVE_ID`；可选 `FEISHU_FOLDER_TOKEN` 指定应用可编辑的文件夹。应用必须拥有文档创建/编辑及向该接收者发消息的权限，机器人需在目标群/用户可见范围内，报告文档应由本工具独占编辑。秘密仅放环境变量；不要写入仓库。
