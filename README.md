@@ -86,7 +86,7 @@ python3 -m work_assistant task add writable-project '在工作区添加合成示
 
 配置默认 `config.local.json`，状态默认 `.wa/`，均被忽略。`--config PATH` 放在子命令之前。所有配置相对路径以配置文件所在目录为基准，支持 `~`；`project --workspace` 同样遵循该规则。证据命令中的源路径相对当前工作目录。参考 [合成配置](examples/config.example.json)。可配置每个提供商的 argv 数组、env、timeout、model，Codex 的 planner_effort/executor effort；不拼 shell，不自动切账号。显式本地 `CODEX_HOME` 可绑定已登录账号，仓库不包含个人路径或账号设置。
 
-`doctor` 检测安装与本机 help 能力，不测试登录、不消费模型。macOS 自动发现标准 Applications 下的 DSH。实际协议为 DSH headless JSON、CC print JSON、Codex exec JSONL；实现依据本机 help，详见 [设计规范](PLAN.md)。DSH 分类设置 `DSH_PERMISSION_MODE=read-only`，没有向旧版本传不存在的权限 flags。classifier/planner 使用临时空工作目录，仅接收任务分类输入；真实项目路径只交给执行器。具体登录/profile overlay 由本机用户维护，不打印完整配置。安装版 DSH 0.2.1-rc.3 源码确认 session 的 `sessionId`、`status.phase=turn_end` 的 `reason.kind=completed` 和最后 `final.text`；三者中终态成功、非空 final 与 exit 0 缺一即拒绝，失败/截断状态不可忽略。成功 fixture 来自安装包协议源码，未声称成功 live 验证；真实认证仍需安装环境冒烟确认。
+`doctor` 检测安装与本机 help 能力，不测试登录、不消费模型。macOS 自动发现标准 Applications 下的 DSH。实际协议为 DSH headless JSON、CC print JSON、Codex exec JSONL；实现依据本机 help，详见 [设计规范](PLAN.md)。DSH 分类设置 `DSH_PERMISSION_MODE=read-only`，没有向旧版本传不存在的权限 flags。classifier/planner 使用临时空工作目录，仅接收任务分类输入；真实项目路径只交给执行器。具体登录/profile overlay 由本机用户维护，不打印完整配置。安装版 DSH 0.2.1-rc.3 源码确认 session 的 `sessionId`、`status.phase=turn_end` 的 `reason.kind=completed` 和最后 `final.text`；三者中终态成功、非空 final 与 exit 0 缺一即拒绝，失败/截断状态不可忽略。成功 fixture 来自安装包协议源码；已于 2026-10-29 在 macOS 的 DSH 0.2.1-rc.3 桌面账号登录下完成真实路由验证。其他安装环境仍需自行检查认证与版本兼容性。
 
 该安装版可能将一行 `[llm-deepseek-account] model listing from https://api.deepseek.com/models loaded N model(s), skipped N row(s)` 诊断写入 stdout。适配器只过滤这个已实证格式；未知非 JSON 行和损坏 JSON 都拒绝，脱敏原始日志仍保留。Codex 的 item 级开发功能 warning 不等于 turn.failed。
 
@@ -164,3 +164,7 @@ python3 -m work_assistant publish REPORT_ID --confirm --retry
 离线 unittest 覆盖严格路由、工具调用升级、一次规划失败、意图/授权不扩大、三种事件解析、进程终止/输出上限、并发与 fencing、证据链和更正、确定性导出、HTML/秘密处理、HTTP 200 应用报错、分步 checkpoint、unknown 核对与 create/update/no-op。测试只监听回环地址，不联系真实服务。macOS/Linux 支持本地任务锁；Windows 暂不支持实际并发运行。真实登录、模型账号权限、安装版本差异和飞书权限需要用户在隔离合成工作区自选进行 live 冒烟，不属于离线通过的证明。
 
 更多约束见 [SECURITY.md](SECURITY.md)、[PLAN.md](PLAN.md)。
+
+## 已验证的实际链路
+
+2026-10-29 在隔离合成 Git 工作区验证了：DSH 简单任务直接路由 → Codex 实际修改指定文件 → Claude Code 独立只读审查 → 本地 Daily Sync 与证据输出；由主控再次核对文件精确内容。另一个复杂任务实际触发一次 DSH → Codex GPT planner 升级并选出 Claude 执行器，该测试只分类，没有执行假设的架构任务。使用 Claude Code 2.1.303 和 Codex 0.164.0-alpha.11.1，复用本机订阅登录。真实飞书仅核验了认证与现有权限，尚未验证创建文档或发送/更新消息；离线 HTTP 测试不替代租户内验收。
