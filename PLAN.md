@@ -139,6 +139,11 @@ imports an explicitly selected, validated local bundle without collecting, sched
 calling models, or publishing. It verifies date/timezone/watermark agreement, aware
 nonfuture coverage with cutoff date matching the requested date in the selected zone, original HTML SHA-256 and validation status; bounded reads stay
 inside ROOT after symlink resolution, and all inputs are re-read before committing.
+Evidence execution_date/report_date aliases require at least one and must agree.
+Optional source_mapping preserves section-to-existing-source-ID arrays as reported
+without inventing claims; missing items becomes an empty list. Missing source summary
+uses an explicit local UI placeholder, while id/verified_at remain required and raw
+source metadata stays private. Imported cards use the blue header template.
 HTMLParser extracts the body title, unique sync-summary and complete readable body
 without active markup/navigation. Table cell/row boundaries and preformatted lines are
 preserved; optional paragraph/list/table end tags are handled, and ambiguous nesting

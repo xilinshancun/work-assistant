@@ -237,10 +237,13 @@ class VisibleReport(HTMLParser):
 
 
 def _evidence_summary(evidence):
-    sources, items, limitations = (evidence.get(k) for k in ("sources", "items", "limitations"))
+    sources, items, limitations = evidence.get("sources"), evidence.get("items", []), evidence.get("limitations")
     if any(type(v) is not list for v in (sources, items, limitations)):
         raise ValueError("evidence sources/items/limitations must be lists")
-    if len(sources) + len(items) + len(limitations) > 1000:
+    mapping = evidence.get("source_mapping", {})
+    if type(mapping) is not dict:
+        raise ValueError("evidence source_mapping must be an object")
+    if len(sources) + len(items) + len(limitations) + len(mapping) > 1000:
         raise ValueError("evidence exceeds 1000 entries")
     selected_sources, selected_items, ids = [], [], set()
     for source in sources:
@@ -250,7 +253,9 @@ def _evidence_summary(evidence):
         if ident in ids:
             raise ValueError("duplicate evidence source id")
         ids.add(ident)
-        selected_sources.append({"id": ident, "summary": _text(source.get("summary"), "source summary"),
+        summary = (_text(source["summary"], "source summary") if "summary" in source
+                   else "源未提供摘要 / No source summary supplied")
+        selected_sources.append({"id": ident, "summary": summary,
                                  "verified_at": _text(source.get("verified_at"), "source verified_at", 100)})
     item_ids = set()
     for item in items:
@@ -266,6 +271,13 @@ def _evidence_summary(evidence):
                                "source_ids": refs, "grade": "reported"})
     selected = {"sources": selected_sources, "items": selected_items,
                 "limitations": [_text(v, "limitation") for v in limitations]}
+    if "source_mapping" in evidence:
+        for section, refs in mapping.items():
+            _text(section, "source_mapping section", 200)
+            if (type(refs) is not list or not refs or len(refs) > 1000
+                    or any(type(ref) is not str or ref not in ids for ref in refs)):
+                raise ValueError("source_mapping requires nonempty arrays of existing source IDs")
+        selected.update(source_mapping=mapping, source_mapping_grade="reported")
     if len(dumps(selected).encode("utf-8")) > 65536:
         raise ValueError("outgoing evidence summary exceeds 64 KiB; narrow source summaries")
     return selected
@@ -281,6 +293,10 @@ def render_import(snapshot):
                        for i in selected["items"]]
     evidence_lines += ["%s: %s (source verified_at: %s; supplied by source)" %
                        (s["id"], s["summary"], s["verified_at"]) for s in selected["sources"]]
+    if "source_mapping" in selected:
+        evidence_lines += ["章节来源映射 / Section source mapping (reported)"]
+        evidence_lines += ["%s → %s" % (section, ", ".join(refs))
+                           for section, refs in selected["source_mapping"].items()]
     evidence_lines += ["局限 / Limitations"] + (selected["limitations"] or ["源未列出 / None supplied by source"])
     evidence_text = "\n".join(evidence_lines)
     plain = title + "\n" + interval + "\n\n" + body
@@ -288,7 +304,7 @@ def render_import(snapshot):
     # Card limits never silently truncate the source summary. Split into native text elements.
     card_text = interval + "\n" + summary
     card = {"config": {"wide_screen_mode": True, "update_multi": True},
-            "header": {"title": {"tag": "plain_text", "content": title}},
+            "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
             "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": card_text[i:i + 1500]}}
                          for i in range(0, len(card_text), 1500)]}
 
@@ -342,8 +358,9 @@ def import_daily(store, project, source_root, period, timezone_name="Asia/Shangh
         report_path, report_raw = _read(root, daily.get("last_report"), MAX_FILE)
         evidence_path, evidence_raw = _read(root, daily.get("last_evidence"), MAX_FILE)
         evidence = _object(evidence_raw, "evidence")
-        if evidence.get("report_type") != "daily" or evidence.get("execution_date") != period:
-            raise ValueError("evidence must be daily with execution_date matching requested date")
+        dates = [evidence[key] for key in ("execution_date", "report_date") if key in evidence]
+        if evidence.get("report_type") != "daily" or not dates or any(value != period for value in dates):
+            raise ValueError("evidence must be daily with execution_date/report_date matching requested date; aliases must agree")
         if evidence.get("timezone") != timezone_name:
             raise ValueError("evidence timezone does not match requested timezone")
         start = _timestamp(evidence.get("covered_from"), "covered_from")

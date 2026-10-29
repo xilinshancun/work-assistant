@@ -93,6 +93,88 @@ class DailyImportTests(Base):
         blocks = preview(self.s, record["id"])["document"]["children"]
         return "\n".join(b["text"]["elements"][0]["text_run"]["content"] for b in blocks)
 
+    def test_date_aliases_require_one_and_agree_when_both_present(self):
+        for fields in ({"execution_date": PERIOD}, {"report_date": PERIOD},
+                       {"execution_date": PERIOD, "report_date": PERIOD}):
+            with self.subTest(fields=fields):
+                self.evidence.pop("execution_date", None)
+                self.evidence.pop("report_date", None)
+                self.evidence.update(fields)
+                self.write_metadata()
+                before = self.evidence_path.read_bytes()
+                report = self.load()
+                self.assertEqual(report["data"]["source_evidence"], self.evidence)
+                self.assertEqual(self.evidence_path.read_bytes(), before)
+                self.assertEqual(report["data"]["period"], PERIOD)
+        for fields in ({}, {"report_date": "2026-01-14"},
+                       {"execution_date": PERIOD, "report_date": "2026-01-14"},
+                       {"execution_date": None, "report_date": PERIOD}):
+            with self.subTest(fields=fields):
+                self.evidence.pop("execution_date", None)
+                self.evidence.pop("report_date", None)
+                self.evidence.update(fields)
+                self.write_metadata()
+                with self.assertRaisesRegex(ValueError, "execution_date/report_date"):
+                    self.load()
+
+    def test_report_date_source_mapping_without_items_or_source_summaries(self):
+        del self.evidence["execution_date"]
+        del self.evidence["items"]
+        self.evidence.update(schema_version=1, report_date=PERIOD,
+            source_mapping={"progress": ["s_build", "s_test"], "support": ["s_scope"]},
+            sources=[{"id": "s_build", "summary": "合成构建记录", "verified_at": "2026-01-15T16:00:00+08:00"},
+                     {"id": "s_test", "facts": {"synthetic": True}, "limits": ["仅合成测试"],
+                      "verified_at": "2026-01-15T16:00:00+08:00"},
+                     {"id": "s_scope", "note": "合成范围说明", "verified_at": "2026-01-15T16:00:00+08:00"}])
+        self.write_metadata()
+        source_before = self.evidence_path.read_bytes()
+        report = self.load(title="合成蓝色日报")
+        files = self.files(report)
+        snapshot = json.loads(files["evidence.json"])
+        self.assertEqual(snapshot["evidence"]["items"], [])
+        self.assertEqual(snapshot["claims"], [])
+        self.assertEqual(snapshot["evidence"]["source_mapping"], self.evidence["source_mapping"])
+        self.assertEqual(snapshot["evidence"]["source_mapping_grade"], "reported")
+        self.assertIn("progress → s_build, s_test", files["evidence.html"])
+        self.assertIn("源未提供摘要 / No source summary supplied", files["evidence.html"])
+        self.assertEqual(snapshot["evidence"]["sources"][1]["summary"], "源未提供摘要 / No source summary supplied")
+        self.assertEqual(report["data"]["source_evidence"], self.evidence)
+        self.assertNotIn("execution_date", report["data"]["source_evidence"])
+        self.assertNotIn("summary", report["data"]["source_evidence"]["sources"][1])
+        self.assertEqual(self.evidence_path.read_bytes(), source_before)
+        card = json.loads(files["card.json"])
+        self.assertEqual(card["header"]["template"], "blue")
+        self.assertEqual(card["header"]["title"]["content"], "合成蓝色日报")
+        for forbidden in ("source_mapping", "s_build", "s_test", "s_scope", "No source summary supplied"):
+            self.assertNotIn(forbidden, files["card.json"])
+            self.assertNotIn(forbidden, self.document_text(report))
+        self.assertEqual(self.load(title="合成蓝色日报")["id"], report["id"])
+        self.assertEqual(self.s.records("claim"), [])
+
+    def test_source_mapping_rejects_unknown_refs_empty_arrays_and_wrong_shapes(self):
+        del self.evidence["items"]
+        for mapping in ({"progress": ["missing"]}, {"progress": []}, {"progress": "s1"},
+                        {"progress": [1]}, {"": ["s1"]}, [], None):
+            with self.subTest(mapping=mapping):
+                self.evidence["source_mapping"] = mapping
+                self.write_metadata()
+                with self.assertRaisesRegex(ValueError, "source_mapping"):
+                    self.load()
+        self.assertEqual(self.s.records("report"), [])
+
+    def test_optional_summary_is_validated_when_present_verified_at_still_required(self):
+        for summary in (None, "", "字" * 2001, 123):
+            with self.subTest(summary=summary):
+                self.evidence["sources"][0]["summary"] = summary
+                self.write_metadata()
+                with self.assertRaisesRegex(ValueError, "source summary"):
+                    self.load()
+        del self.evidence["sources"][0]["summary"]
+        del self.evidence["sources"][0]["verified_at"]
+        self.write_metadata()
+        with self.assertRaisesRegex(ValueError, "source verified_at"):
+            self.load()
+
     def test_compact_table_preserves_caption_cells_and_rows(self):
         table = "<table><caption>样本计数</caption><tr><th>A<th>B<tr><td>10<td>20</table>"
         self.write_bundle(HTML.replace("<h2>详细结果</h2>", table))
