@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 from unittest.mock import patch
 
 from work_assistant import daily_import
@@ -85,6 +86,8 @@ class DailyImportTests(Base):
         self.evidence_path.write_text(dumps(self.evidence), encoding="utf-8")
 
     def load(self, period=PERIOD, **kwargs):
+        # This synthetic bundle is an explicitly verified main-only template.
+        kwargs.setdefault("body_scope", "main")
         return import_daily(self.s, self.p["id"], self.bundle, period, **kwargs)
 
     def files(self, record):
@@ -172,14 +175,115 @@ class DailyImportTests(Base):
         self.assertEqual(self.s.records("report"), [])
 
     def test_native_rejects_visible_business_content_outside_main(self):
+        strict_template = HTML.replace("<p>2026-01-15</p>", "").replace(
+            "<p>区间：2026-01-14 17:30 至 2026-01-15 17:30</p>", "")
         for fragment in ("<section><p>PR 尚未完成。</p></section>",
                          "<article><header><p>PR 状态仍未确认。</p></header></article>",
                          "<footer><p>业务限定：仍需复核。</p></footer>"):
             with self.subTest(fragment=fragment):
-                self.write_bundle(HTML.replace("</main>", "</main>" + fragment))
+                self.write_bundle(strict_template.replace("</main>", "</main>" + fragment))
                 with self.assertRaisesRegex(ValueError, "visible content outside main"):
-                    self.load()
+                    self.load(body_scope="strict")
         self.assertEqual(self.s.records("report"), [])
+
+    def test_native_shell_body_header_five_sections_and_footer(self):
+        source = """<!doctype html><html><body>
+        <header><h1>合成日报壳层</h1><a href="#sync-summary">头部摘要导航</a>
+        <p>源头部覆盖说明</p></header>
+        <main><section id="sync-summary"><h2>摘要</h2><p>合成摘要，尚未独立复现。</p></section>
+        <section><h2>完成事项</h2><p>只完成合成检查。</p></section>
+        <section><h2>发现</h2><p>结果仍有条件。</p></section>
+        <section><h2>阻塞</h2><p>仍需人工核对。</p></section>
+        <section><h2>下一步</h2><p>计划尚未完成。</p></section></main>
+        <footer><p>合成页脚说明</p><a href="index.html">返回报告列表</a></footer>
+        </body></html>"""
+        self.write_bundle(source)
+        with self.assertRaisesRegex(ValueError, "visible content outside main"):
+            import_daily(self.s, self.p["id"], self.bundle, PERIOD)
+        report = self.load()
+        document = preview(self.s, report["id"])["document"]
+        self.assertEqual(document["title"], "合成日报壳层")
+        self.assertEqual(sum(b["block_type"] == 4 for b in document["children"]), 5)
+        text = self.document_text(report)
+        for phrase in ("合成摘要，尚未独立复现。", "只完成合成检查。", "结果仍有条件。", "仍需人工核对。", "计划尚未完成。"):
+            self.assertIn(phrase, text)
+        for ui in ("头部摘要导航", "源头部覆盖说明", "合成页脚说明", "返回报告列表"):
+            self.assertNotIn(ui, text)
+        self.assertEqual(report["data"]["import_options"], {"body_scope": "main"})
+        self.assertEqual(json.loads(self.files(report)["evidence.json"])["import_options"], {"body_scope": "main"})
+        self.assertEqual(self.load()["id"], report["id"])
+
+    def test_native_header_qualification_is_rejected_by_default_not_silently_removed(self):
+        source = """<body><header><h1>合成日报</h1><p>采集不完整，当前结论仍受限。</p></header>
+        <main><section id="sync-summary"><h2>摘要</h2><p>仅观察到合成结果。</p></section></main></body>"""
+        self.write_bundle(source)
+        before = self.report_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "visible content outside main"):
+            import_daily(self.s, self.p["id"], self.bundle, PERIOD)
+        self.assertEqual(self.s.records("report"), [])
+        report = self.load(body_scope="main")
+        self.assertEqual(before, self.report_path.read_bytes())
+        self.assertIn("采集不完整，当前结论仍受限。", json.loads(self.files(report)["evidence.json"])["body"])
+        self.assertNotIn("采集不完整", self.document_text(report))
+
+    def test_native_body_scope_is_recorded_hashed_and_only_explicit_main_excludes_chrome(self):
+        source = """<body><header><h1>合成日报</h1><nav>导航</nav></header>
+        <main><section id="sync-summary"><h2>摘要</h2><p>合成结果仍有限。</p></section></main>
+        <footer><nav>证据导航</nav></footer></body>"""
+        self.write_bundle(source)
+        strict = self.load(body_scope="strict")
+        original = self.files(strict)
+        main = self.load(body_scope="main")
+        self.assertNotEqual(strict["data"]["hash"], main["data"]["hash"])
+        self.assertEqual(original["document.json"], self.files(main)["document.json"])
+        self.assertEqual(self.files(strict), original)
+        self.assertEqual(strict["data"]["import_options"], {"body_scope": "strict"})
+        self.assertEqual(self.load(body_scope="main")["id"], main["id"])
+
+    def test_native_deliverable_http_links_are_clickable_with_bold_and_safe_preview(self):
+        urls = ["https://github.com/synthetic-org/synthetic-repo/pull/%s" % i for i in range(1, 5)]
+        urls.append("https://github.com/synthetic-org/synthetic-repo/blob/main/rfc.md")
+        items = ['<li><a href="%s"><strong>PR 1</strong></a>：待复核。</li>' % urls[0],
+                 '<li><strong><a href="%s">PR 2</a></strong>：待复核。</li>' % urls[1]]
+        items += ['<li><a href="%s">%s</a>：待复核。</li>' % (url, "PR " + str(i + 1) if i < 4 else "RFC")
+                  for i, url in enumerate(urls[2:], start=2)]
+        self.write_bundle(HTML.replace("<main>", "<main><h2>交付物</h2><ul>" + "".join(items) + "</ul>"))
+        report = self.load()
+        document = preview(self.s, report["id"])["document"]
+        self.assertEqual(daily_import.block_text(document["children"][1]), "交付物")
+        linked = []
+        for block in document["children"]:
+            if block["block_type"] == 12:
+                linked.extend(e["text_run"] for e in block["bullet"]["elements"]
+                              if e["text_run"].get("text_element_style", {}).get("link"))
+        self.assertEqual([unquote(run["text_element_style"]["link"]["url"]) for run in linked], urls)
+        self.assertTrue(linked[0]["text_element_style"]["bold"])
+        self.assertTrue(linked[1]["text_element_style"]["bold"])
+        for url in urls:
+            self.assertIn('href="' + url + '"', self.files(report)["index.html"])
+        self.assertIn('<a href="' + urls[0] + '"><strong>PR 1</strong></a>', self.files(report)["index.html"])
+
+    def test_native_relative_or_unsafe_links_never_become_outbound_urls(self):
+        fragment = ('<p><a href="../evidence.json">本地证据</a>；'
+                    '<a href="/Users/synthetic/private.json">本地详情</a>；'
+                    '<a href="javascript:alert(1)">仅保留标签</a>。</p>')
+        self.write_bundle(HTML.replace("<h2>详细结果</h2>", fragment))
+        report = self.load()
+        document = preview(self.s, report["id"])["document"]
+        text = self.document_text(report)
+        self.assertIn("本地证据；本地详情；仅保留标签。", text)
+        for forbidden in ("../evidence.json", "/Users/synthetic/private.json", "javascript:"):
+            self.assertNotIn(forbidden, self.files(report)["document.json"])
+            self.assertNotIn(forbidden, self.files(report)["index.html"])
+        self.assertNotIn('"link"', dumps(document))
+        for href in ("https://example.invalid/docs?path=/Users/alice/run.txt",
+                     "https://example.invalid/docs?token=synthetic-private-secret",
+                     "https://synthetic-user:synthetic-password@example.invalid/docs"):
+            with self.subTest(href=href):
+                self.write_bundle(HTML.replace("<h2>详细结果</h2>", '<p><a href="' + href + '">外部资料</a></p>'))
+                with self.assertRaises(ValueError) as error:
+                    self.load()
+                self.assertNotIn(href, str(error.exception))
 
     def test_native_preserves_article_header_later_h1_and_h4_to_h6(self):
         fragment = ("<article><header><p>PR 状态：尚未完成。</p></header><p>限定：未独立复现。</p></article>"
@@ -851,7 +955,8 @@ class DailyImportTests(Base):
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             return json.loads(result.stdout)
         report = cli("import-daily", self.p["id"], "--source-root", str(self.bundle), "--date", PERIOD,
-                     "--title", "合成 CLI 提前预览")
+                     "--title", "合成 CLI 提前预览", "--body-scope", "main")
+        self.assertEqual(report["data"]["import_options"], {"body_scope": "main"})
         payload = cli("publish", report["id"], "--dry-run")
         self.assertEqual(payload["status"], "dry_run")
         self.assertEqual(payload["document"]["title"], "合成 CLI 提前预览")
