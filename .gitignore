@@ -9,6 +9,7 @@ dist/
 !.env.example
 .wa/
 .local/
+private-lark-cli/
 out/
 *.sqlite*
 *.db
