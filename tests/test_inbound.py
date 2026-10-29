@@ -297,6 +297,61 @@ class InboundTests(unittest.TestCase):
         with self.assertRaisesRegex(ProtocolError,'artifact changed'):self.new_engine().advance(record)
         self.assertEqual(self.replies,[])
 
+    def test_url_answer_falls_back_to_complete_text_shared_send_get_and_no_duplicate(self):
+        answer='参考 https://example.com/guide?a=1&b=2#part\n**原文** _x_ [label] <tag> \\ "😀"'
+        self.ds.value=decision(answer=answer)
+        expected='【快速回答】\n未查询项目状态 · 未执行操作\n\n'+answer
+        transport=FakeHTTP(self.store);settings=dict(load(self.root/'blank.json')['publisher'])
+        def shared_send(store,_settings,*args,**kwargs):
+            return messages.send(store,settings,*args,transport=transport,**kwargs)
+        self.engine.sender=self.engine._send
+        with patch.dict(os.environ,{'FEISHU_APP_ID':'cli_fixture','FEISHU_APP_SECRET':'synthetic-secret'}), \
+                patch('work_assistant.inbound.send_message',side_effect=shared_send):
+            record=self.engine.advance(self.accept());self.engine.advance(record)
+        self.assertEqual(record['data']['status'],'completed');self.assertEqual(len(transport.posts()),1)
+        self.assertEqual(json.loads(transport.posts()[0][2]['content']),{'text':expected})
+        self.assertEqual(transport.posts()[0][2]['msg_type'],'text')
+        self.assertEqual(record['data']['final_msg_type'],'text')
+        self.assertTrue(all(self.store.records(messages.KIND)[0]['data']['checks'].values()))
+
+    def test_url_fallback_recovery_keeps_frozen_text_hash_and_type(self):
+        answer='https://example.com/read\n正文原样 😀'
+        self.ds.value=decision(answer=answer);record=self.accept()
+        with patch.object(self.engine,'reply',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):self.engine.advance(record)
+        record=self.store.get(record['id']);directory=self.store.root/'inbound'/record['id']
+        raw=(directory/'final.txt').read_bytes();hash_value=record['data']['final_text_hash']
+        self.assertEqual(record['data']['final_msg_type'],'text');self.assertFalse((directory/'final.json').exists())
+        self.ds.value=decision(answer='new card-compatible answer must not replace frozen text')
+        engine=self.new_engine();done=engine.advance(record);engine.advance(done)
+        self.assertEqual(done['data']['status'],'completed');self.assertEqual(len(self.replies),1)
+        self.assertEqual(self.replies[0][2].encode(),raw);self.assertEqual(done['data']['final_text_hash'],hash_value)
+        self.assertEqual(done['data']['final_intent']['msg_type'],'text')
+        self.assertEqual((directory/'final.txt').read_bytes(),raw);self.assertFalse((directory/'final.json').exists())
+
+    def test_json_byte_limit_falls_back_before_freeze_without_truncating_answer(self):
+        # Valid plain text fits 16 KiB, while JSON escaping pushes the otherwise
+        # supported (<5000 character) card body above the shared file limit.
+        answer='😀'*3500+'\\'*1200
+        self.assertLess(len(answer),5000);self.assertGreater(len(dumps({'answer':answer}).encode()),16*1024)
+        record=self.accept();status='需要进一步确认 · 未应用改动'
+        done=self.engine.final(record,answer,'needs_user',title='深度分析',note=status)
+        expected='【深度分析】\n'+status+'\n\n'+answer
+        self.assertLess(len(expected.encode()),16*1024)
+        self.assertEqual(done['data']['status'],'needs_user');self.assertEqual(done['data']['final_msg_type'],'text')
+        self.assertEqual(self.replies[0][2],expected)
+        directory=self.store.root/'inbound'/record['id']
+        self.assertEqual((directory/'final.txt').read_bytes(),expected.encode());self.assertFalse((directory/'final.json').exists())
+
+    def test_invalid_oversize_final_is_rejected_before_artifact_or_final_plan(self):
+        record=self.accept()
+        with self.assertRaises(ProtocolError):
+            self.engine.final(record,'😀'*5000,title='快速回答',note='未查询项目状态 · 未执行操作')
+        data=self.store.get(record['id'])['data'];directory=self.store.root/'inbound'/record['id']
+        self.assertNotIn('final_msg_type',data);self.assertNotIn('final_intent',data)
+        self.assertFalse((directory/'final.txt').exists());self.assertFalse((directory/'final.json').exists())
+        self.assertEqual(self.replies,[])
+
     def test_shared_card_send_unknown_restart_preserves_payload_and_never_posts_again(self):
         transport=FakeHTTP(self.store);transport.send_error=messages.AmbiguousError('synthetic lost acknowledgement')
         settings=dict(load(self.root/'blank.json')['publisher'])

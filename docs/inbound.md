@@ -158,6 +158,12 @@ permissions, final formatting, delegation or message delivery in your tenant.
 New quick/deep answer finals use the shared bounded display-only card path:
 a blue “快速回答” / “深度分析” header, a small gray status note, a divider and
 the original answer in `plain_text` (Markdown symbols are not interpreted).
+Before freezing, the card must pass the existing card validator and 16 KiB UTF-8
+file limit. Unsupported content (such as a bare HTTP URL) or JSON expansion above
+that limit falls back to complete text: `【快速回答/深度分析】`, the status on its
+own line, a blank line, then the unchanged answer. Nothing is truncated; a text
+payload that also exceeds the shared limit is rejected before freezing or send
+intent. Recovery never reselects the format of this fallback.
 Quick notes state that no project state was queried and no operation executed.
 Deep notes distinguish completed analysis from a result needing confirmation;
 isolated unapplied changes are explicitly labeled as not applied or merged.

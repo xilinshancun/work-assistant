@@ -28,6 +28,17 @@ RESULT='.wa-inbound-result.json'
 MAX_QUERY_FAILURES=10
 
 
+def _reply_bytes(text,msg_type):
+    """Validate the shared message contract before freezing any final artifact."""
+    raw=text.encode('utf-8');outbound_guard(text)
+    if (not text.strip() or len(raw)>16*1024
+            or any(ord(c)<32 and c not in '\n\r\t' for c in text)):
+        raise ProtocolError('reply exceeds outgoing bound or contains unsupported text')
+    if msg_type not in {'text','interactive'}:raise ProtocolError('unsupported reply format')
+    if msg_type=='interactive':parse_card(text)
+    return raw
+
+
 def ident(app,message):return 'inbound_'+digest([app,message])[:32]
 
 
@@ -168,10 +179,7 @@ class Engine:
     def reply(self,record,kind,text,msg_type='text'):
         data=record['data'];field=kind+'_intent'
         if data.get(field):return record  # Host crash before/after send never reposts.
-        raw=text.encode('utf-8');outbound_guard(text)
-        if len(raw)>16*1024:raise ProtocolError('reply exceeds outgoing bound')
-        if msg_type not in {'text','interactive'}:raise ProtocolError('unsupported reply format')
-        if msg_type=='interactive':parse_card(text)
+        raw=_reply_bytes(text,msg_type)
         path=self.store.root/'inbound'/record['id']/(kind+('.json' if msg_type=='interactive' else '.txt'));private_write(path,raw)
         request='inbound:'+record['id']+':'+kind
         record=self.save(record,**{field:{'request_id':request,'text_hash':digest(raw),'msg_type':msg_type,'at':now()}})
@@ -186,21 +194,23 @@ class Engine:
     def final(self,record,text,status='completed',title=None,note=None):
         msg_type='text'
         if title is not None:
-            text=dumps({'config':{'wide_screen_mode':True},
+            card=dumps({'config':{'wide_screen_mode':True},
                         'header':{'template':'blue','title':{'tag':'plain_text','content':title}},
                         'elements':[{'tag':'note','elements':[{'tag':'plain_text','content':note}]},
                                     {'tag':'hr'},{'tag':'div','text':{'tag':'plain_text','content':text}}]})
-            msg_type='interactive'
+            try:_reply_bytes(card,'interactive')
+            except ValueError:
+                text='【'+title+'】\n'+note+'\n\n'+text
+            else:text=card;msg_type='interactive'
         return self._frozen_final(record,text,msg_type,status)
 
     def _frozen_final(self,record,text,msg_type,status):
         """Freeze format and exact bytes; recovery never rebuilds a planned payload."""
-        if msg_type not in {'text','interactive'}:raise ProtocolError('unsupported final format')
-        if msg_type=='interactive':parse_card(text)
+        raw=_reply_bytes(text,msg_type)
         path=self.store.root/'inbound'/record['id']/('final.json' if msg_type=='interactive' else 'final.txt')
-        private_write(path,text.encode('utf-8'))
+        private_write(path,raw)
         record=self.save(record,status='finalizing',completion_status=status,final_msg_type=msg_type,
-                         final_text_hash=digest(text.encode('utf-8')))
+                         final_text_hash=digest(raw))
         record=self.reply(record,'final',text,msg_type)
         receipt=record['data'].get('final_receipt',{})
         verified=receipt.get('status')=='completed' and receipt.get('verification_status')=='verified'
