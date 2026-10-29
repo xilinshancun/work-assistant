@@ -46,7 +46,7 @@ def validate(conf,store,enabled=False):
         v=value.get(key,default)
         if type(v) not in (int,float) or not math.isfinite(v) or not low<=v<=high:raise ValueError('invalid inbound '+key)
         value[key]=v
-    if type(value['gpt_provider']) is not str or re.fullmatch(r'codex(?:/[A-Za-z0-9_.-]+)?',value['gpt_provider']) is None:
+    if type(value['gpt_provider']) is not str or re.fullmatch(r'(?:codex|codex-b)(?:/[A-Za-z0-9_.-]+)?',value['gpt_provider']) is None:
         raise ValueError('inbound deep provider must be an explicitly configured Codex/GPT provider')
     if value.get('gpt_model') is not None and (type(value['gpt_model']) is not str or re.fullmatch(r'[A-Za-z0-9_.-]+',value['gpt_model']) is None):
         raise ValueError('invalid trusted inbound GPT model')

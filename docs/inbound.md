@@ -23,9 +23,11 @@ and the appropriate DM/group-mention permissions in your own tenant. This module
 does not change subscriptions/scopes in the application console. Paseo must be
 installed and its local daemon authenticated/configured separately. It discovers
 the standard macOS executable when `paseo_argv` is omitted, otherwise uses PATH;
-the example deliberately uses PATH. `gpt_provider` is explicitly `codex` or a
-configured `codex/MODEL`, with optional `gpt_model`; no account/model alias is
-hardcoded. Deep processing uses `high` thinking and `auto-review`. DSH uses the
+the example deliberately uses PATH. `gpt_provider` is explicitly `codex` or the
+trusted configured alias `codex-b`; both accept the official `PROVIDER/MODEL`
+combination, with optional `gpt_model`. The alias must already exist in Paseo;
+this module does not create an alias, switch accounts or fall back to another
+provider. Deep processing uses `high` thinking and `auto-review`. DSH uses the
 existing provider config with a maximum 20-second tool-free classification call;
 missing/failed DSH escalates once to Paseo GPT instead of installing everything.
 

@@ -245,6 +245,14 @@ class InboundTests(unittest.TestCase):
         self.store.db.execute("UPDATE projects SET grants='[]'")
         with self.assertRaises(ValueError):self.new_engine()
 
+    def test_explicit_codex_b_provider_alias_and_model_are_trusted_config_only(self):
+        for provider in ('codex','codex/synthetic-model','codex-b','codex-b/synthetic-model'):
+            changed=copy.deepcopy(self.conf);changed['inbound']['gpt_provider']=provider
+            self.assertEqual(inbound.validate(changed,self.store)['gpt_provider'],provider)
+        for provider in ('codex-a','codex-b/','codex-b/model/extra','codex-b --mode full-access','claude/model'):
+            changed=copy.deepcopy(self.conf);changed['inbound']['gpt_provider']=provider
+            with self.assertRaises(ValueError):inbound.validate(changed,self.store)
+
     def test_preflight_before_consumer_identity_and_bot(self):
         class Client:
             def app_id(self):return 'cli_other'
@@ -331,6 +339,14 @@ class PaseoProtocolTests(unittest.TestCase):
                        self.result([{'shortId':'abc','cwd':str(self.root)}]),self.result([{'id':'agent','cwd':'/synthetic/wrong'}])):
             self.responses=[output]
             with self.assertRaises(ValueError):self.paseo.lookup('key',self.root)
+
+    def test_codex_b_model_combination_is_passed_as_official_provider_argument(self):
+        self.paseo.settings['gpt_provider']='codex-b/synthetic-model'
+        self.responses=[self.result({'agentId':'agent_full','status':'created','cwd':str(self.root),'provider':'codex-b'})]
+        self.paseo.launch('key',self.root,self.root/'request.json',self.root/inbound.RESULT)
+        argv=self.calls[-1][0]
+        self.assertEqual(argv[argv.index('--provider')+1],'codex-b/synthetic-model')
+        self.assertEqual(argv[argv.index('--model')+1],'synthetic-model')
 
     def test_wait_permission_error_timeout_never_terminal_result(self):
         for state,wanted in [('permission','needs_user'),('error','needs_user'),('timeout','running')]:
