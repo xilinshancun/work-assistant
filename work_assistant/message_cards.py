@@ -44,7 +44,7 @@ def card_projection(card):
             fail()
         tag = element.get("tag")
         if tag == "div" and set(element) == {"tag", "text"}:
-            rows.append([{"tag": "text", "text": text(element["text"], markdown=True)}])
+            rows.append([{"tag": "text", "text": text(element["text"], markdown=True).strip("\n")}])
         elif tag == "hr" and set(element) == {"tag"}:
             rows.append([{"tag": "hr"}])
         elif tag == "note" and set(element) == {"tag", "elements"} and type(element["elements"]) is list:

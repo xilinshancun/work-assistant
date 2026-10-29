@@ -18,7 +18,7 @@ CARD = {"config": {"wide_screen_mode": True, "update_multi": True},
                      {"tag": "note", "elements": [{"tag": "plain_text", "content": "Synthetic assistant"}]}]}
 # A sanitized fixture from the actual message-GET projection contract; URLs/styles are absent.
 PROJECTION = {"title": "Synthetic preview", "elements": [[{"tag": "text", "text": "Unverified example."}],
-               [{"tag": "hr"}], [{"tag": "text", "text": "\n· Next step: inspect."}],
+               [{"tag": "hr"}], [{"tag": "text", "text": "· Next step: inspect."}],
                [{"tag": "button", "text": "Open", "type": "default"}],
                [{"tag": "note", "elements": [{"tag": "text", "text": "Synthetic assistant"}]}]]}
 
