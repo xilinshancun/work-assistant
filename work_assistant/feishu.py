@@ -168,8 +168,11 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
             "document_id": None, "block_ids": [], "message_id": None, "mode": settings["mode"], "steps": []}
         if data.get("status") in {"outcome_unknown", "publishing"}:
             raise ValueError("publication outcome unknown; reconcile before explicit retry")
-        if data.get("status") == "completed" and data.get("hash") == payload["hash"]:
+        if data.get("status") == "completed" and (data.get("hash") == payload["hash"] or
+                ("report_hash" not in data and data.get("hash") == report_hash)):
             return dict(data, no_op=True)
+        if data.get("document_member_status") == "outcome_unknown":
+            raise ValueError("document sharing outcome unknown; explicitly confirm member grant via reconcile before retry")
         if data.get("status") in {"failed", "retry_authorized", "cancelled"} and not retry:
             raise ValueError("previous attempt requires explicit --retry after inspection")
         if prior and data["mode"] == "webhook" and data.get("hash") != payload["hash"] and data.get("status") == "completed":
@@ -276,6 +279,8 @@ def publish(store, settings, report_id, confirm=False, transport=http, base=BASE
                 data.update(status="failed", pending=None, error="authentication interrupted before any publication request")
             else:
                 data.update(status="outcome_unknown", error="request interrupted or response ambiguous; inspect before retry")
+                if (data.get("pending") or {}).get("stage") == "share_document_member":
+                    data["document_member_status"] = "outcome_unknown"
             checkpoint()
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -297,6 +302,12 @@ def reconcile(store, settings, ident, resolution=None, reason=None, remote_ids=N
         client = make_client(settings, transport, base, process)
         if (data.get("document_id") or data.get("message_id")) and client.destination() != data["destination"]:
             raise ValueError("reconcile destination differs from original publication")
+        sharing_unknown = (data.get("document_member_status") == "outcome_unknown" or
+            (data["status"] == "outcome_unknown" and (data.get("pending") or {}).get("stage") == "share_document_member"))
+        if sharing_unknown:
+            data["document_member_status"] = "outcome_unknown"
+        if remote_ids is not None and not resolution:
+            raise ValueError("remote confirmations require an explicit resolution and reason")
         inspected = {}
         if data.get("document_id"):
             doc = urllib.parse.quote(data["document_id"], safe="")
@@ -308,14 +319,31 @@ def reconcile(store, settings, ident, resolution=None, reason=None, remote_ids=N
             if resolution not in {"completed", "retry_authorized", "cancelled"} or not reason or not reason.strip():
                 raise ValueError("explicit resolution requires a valid status and reason")
             if remote_ids:
-                if type(remote_ids) is not dict or set(remote_ids) - {"document_id", "message_id", "block_ids"}:
+                if type(remote_ids) is not dict or set(remote_ids) - {"document_id", "message_id", "block_ids", "document_member_granted"}:
                     raise ValueError("invalid remote ID mapping")
                 for key in ("document_id", "message_id"):
                     if key in remote_ids and type(remote_ids[key]) is not str:
                         raise ValueError("remote IDs must be strings")
                 if "block_ids" in remote_ids and (type(remote_ids["block_ids"]) is not list or any(type(i) is not str for i in remote_ids["block_ids"])):
                     raise ValueError("block_ids must be string list")
-                data.update(remote_ids)
+                confirmation = remote_ids.get("document_member_granted")
+                if "document_member_granted" in remote_ids:
+                    if confirmation is not True:
+                        raise ValueError("document_member_granted must be exactly true after manual verification")
+                    member = client.document_member()
+                    if not member or client.destination() != data["destination"]:
+                        raise ValueError("document member confirmation requires the original explicit member and destination")
+                    document_id = remote_ids.get("document_id", data.get("document_id"))
+                    if not document_id or (data.get("document_id") and document_id != data["document_id"]):
+                        raise ValueError("document member confirmation must refer to the original known document")
+                    fingerprint = digest([member, client.settings.get("document_member_perm", "edit")])
+                    if data.get("document_member_fingerprint") not in (None, fingerprint):
+                        raise ValueError("document member confirmation differs from recorded member")
+                    data.update(document_member_fingerprint=fingerprint, document_member_status="granted",
+                                document_member_verification="operator_confirmed")
+                data.update({key: value for key, value in remote_ids.items() if key != "document_member_granted"})
+            if sharing_unknown and resolution in {"completed", "retry_authorized"} and data.get("document_member_status") != "granted":
+                raise ValueError("unknown document sharing requires explicit document_member_granted confirmation before continuing")
             data.update(status=resolution, resolution_reason=reason, pending=None)
             with store.transaction():
                 store.update_record(ident, data)

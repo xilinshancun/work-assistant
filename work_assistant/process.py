@@ -42,6 +42,7 @@ class ProcessResult:
     truncated: bool = False
     latency_ms: int = 0
     diagnostics: list = field(default_factory=list)
+    invalid_utf8: bool = False
 
 
 def subprocess_environment(env=None, inherit_env=True):
@@ -148,5 +149,13 @@ def execute(argv, prompt, cwd, env=None, timeout=600, pass_fds=(), max_bytes=2 *
     except BaseException:
         kill()
         raise
-    return ProcessResult(output[0].decode("utf-8", "replace"), output[1].decode("utf-8", "replace"),
-                         proc.returncode, timed_out, overflow.is_set(), round((time.monotonic() - started) * 1000), diagnostics)
+    invalid_utf8 = False
+    decoded = []
+    for raw in output:
+        try:
+            decoded.append(raw.decode("utf-8", "strict"))
+        except UnicodeDecodeError:
+            invalid_utf8 = True
+            decoded.append(raw.decode("utf-8", "replace"))
+    return ProcessResult(decoded[0], decoded[1], proc.returncode, timed_out, overflow.is_set(),
+                         round((time.monotonic() - started) * 1000), diagnostics, invalid_utf8)

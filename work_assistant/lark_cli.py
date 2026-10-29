@@ -80,8 +80,8 @@ class LarkCLI(Feishu):
             raise APIError("lark_cli could not start; no request was launched") from None
         except (OSError, ValueError):
             raise AmbiguousError("lark_cli interrupted; inspect remote state before retry") from None
-        if result.timed_out or result.truncated or result.returncode < 0:
-            raise AmbiguousError("lark_cli timeout, interruption or output limit; no automatic retry")
+        if result.timed_out or result.truncated or result.returncode < 0 or result.invalid_utf8:
+            raise AmbiguousError("lark_cli timeout, interruption, output limit or invalid UTF-8; no automatic retry")
         return result
 
     @staticmethod
@@ -96,8 +96,6 @@ class LarkCLI(Feishu):
         def constant(_):
             raise ValueError("non-finite JSON constant")
         try:
-            if "\ufffd" in raw:
-                raise ValueError("possibly replaced invalid UTF-8")
             return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
         except (ValueError, TypeError):
             raise AmbiguousError("lark_cli returned invalid JSON; inspect remote state") from None

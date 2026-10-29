@@ -9,6 +9,7 @@ from work_assistant.feishu import publish, reconcile, make_client, Feishu, APIEr
 from work_assistant.lark_cli import LarkCLI
 from work_assistant.process import execute, ProcessResult, ProcessLaunchError
 from work_assistant.reports import generate_report
+from work_assistant.util import digest
 from test_runtime import Base
 
 FAKE = r'''
@@ -32,6 +33,9 @@ if path.endswith("/bot/v3/info") and mode.get("auth_error"):
     sys.exit(3)
 if path.endswith("/im/v1/messages") and method == "POST" and mode.get("timeout"):
     time.sleep(10)
+if "/drive/v1/permissions/" in path and mode.get("share_timeout"):
+    (root / "granted.json").write_text(json.dumps(body))
+    time.sleep(10)
 if path.endswith("/im/v1/messages") and mode.get("reject"):
     print(json.dumps({"ok": False, "identity": "bot", "error": {"type": "authorization", "subtype": "missing_scope", "message": "synthetic-private"}}), file=sys.stderr)
     sys.exit(4)
@@ -39,12 +43,16 @@ data = {}
 if path.endswith("/docx/v1/documents"):
     data = {"document": {"document_id": "doc-fixture"}}
 elif path.endswith("/children"):
-    data = {"children": [{"block_id": "block-%s" % body["index"]}]}
+    block = dict(body["children"][0], block_id="block-%s" % body["index"])
+    data = {"children": [block]}
 elif path.endswith("/im/v1/messages"):
-    data = {"message_id": "message-fixture"}
+    data = {"message_id": "message-fixture", "body": {"content": body["content"]}}
 elif method == "GET":
-    data = {"content": "synthetic observation"}
-print(json.dumps({"ok": True, "identity": "bot", "data": data}))
+    data = {"content": "synthetic observation\ufffd"}
+if mode.get("invalid_utf8") and path.endswith("/im/v1/messages"):
+    sys.stdout.buffer.write(b'{"ok":true,"identity":"bot","data":{"message_id":"message-fixture","content":"\xff"}}')
+else:
+    sys.stdout.buffer.write(json.dumps({"ok": True, "identity": "bot", "data": data}, ensure_ascii=False).encode("utf-8"))
 '''
 
 
@@ -113,6 +121,58 @@ class LarkCLITests(Base):
         self.assertEqual(result["status"], "failed")
         self.assertIsNone(result["pending"])
         self.assertEqual(len(self.calls()), 1)
+
+    def test_legal_utf8_replacement_character_survives_block_and_message_echo(self):
+        self.s.add_task(self.p["id"], "synthetic observation \ufffd", "read")
+        self.report = generate_report(self.s, self.p["id"], "2026-01-15")
+        observed = []
+        def capture(*args, **kwargs):
+            result = execute(*args, **kwargs)
+            if "\ufffd" in result.stdout:
+                observed.append(args[0])
+                self.assertFalse(result.invalid_utf8)
+            return result
+        result = self.send(process=capture)
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(any(any("/children" in a for a in argv) for argv in observed))
+        self.assertTrue(any("/open-apis/im/v1/messages" in argv for argv in observed))
+        inspection = reconcile(self.s, self.settings, result["publication_id"])
+        self.assertIn("\ufffd", inspection["inspection"]["message"]["content"])
+
+    def test_illegal_utf8_from_cli_is_unknown_after_send(self):
+        self.mode(invalid_utf8=True)
+        result = self.send()
+        self.assertEqual(result["status"], "outcome_unknown")
+        self.assertEqual(result["pending"]["stage"], "create_card")
+        with self.assertRaises(ValueError):
+            self.send(retry=True)
+
+    def test_runner_distinguishes_real_invalid_utf8_from_legal_replacement(self):
+        for stream in ("stdout", "stderr"):
+            for raw, expected in [(b"\xff", True), ("\ufffd".encode("utf-8"), False)]:
+                with self.subTest(stream=stream, raw=raw):
+                    result = execute([sys.executable, "-c", "import sys; sys.%s.buffer.write(%r)" % (stream, raw)],
+                                     "", cwd=self.root)
+                    self.assertIs(result.invalid_utf8, expected)
+                    self.assertIn("\ufffd", getattr(result, stream))
+
+    def test_legacy_completed_report_is_noop_without_any_cli_request(self):
+        destination = LarkCLI(self.settings).destination()
+        legacy = {"identity": digest([destination, self.p["id"], self.report["data"]["period"]]),
+                  "destination": destination, "document_id": "legacy-doc", "block_ids": ["legacy-block"],
+                  "message_id": "legacy-message", "mode": "app", "status": "completed",
+                  "hash": self.report["data"]["hash"], "steps": []}
+        record = self.s.record("publication", legacy, project_id=self.p["id"])
+        self.assertTrue(self.send()["no_op"])
+        self.assertEqual(self.calls(), [])
+        self.assertNotIn("report_hash", self.s.get(record["id"])["data"])
+        self.task()
+        self.report = generate_report(self.s, self.p["id"], "2026-01-15")
+        updated = self.send()
+        self.assertEqual(updated["status"], "completed")
+        self.assertEqual(updated["document_id"], "legacy-doc")
+        card = next(c for c in self.calls() if "/open-apis/im/v1/messages/legacy-message" in c["args"])
+        self.assertIn("https://www.feishu.cn/docx/legacy-doc", card["body"]["content"])
 
     def test_auth_rejection_has_no_writeahead_and_explicit_retry(self):
         self.mode(auth_error=True)
@@ -202,6 +262,90 @@ class LarkCLITests(Base):
             self.assertEqual(result["document_id"], "doc-fixture")
             with self.assertRaises(ValueError):
                 self.send(retry=True)
+
+    def unknown_share(self):
+        self.settings.update(document_member_env="WA_APPROVED_MEMBER", cli_timeout=.2)
+        self.mode(share_timeout=True)
+        result = self.send()
+        self.assertEqual(result["status"], "outcome_unknown")
+        self.assertEqual(result["document_member_status"], "outcome_unknown")
+        self.assertTrue((self.directory / "granted.json").exists())
+        self.mode()
+        return result
+
+    def share_calls(self):
+        return [c for c in self.calls() if any("/drive/v1/permissions/" in a for a in c["args"])]
+
+    def test_unknown_share_manual_confirmation_continues_without_regrant(self):
+        with patch.dict(os.environ, {"WA_APPROVED_MEMBER": "ou_fixture"}):
+            result = self.unknown_share()
+            with self.assertRaises(ValueError):
+                reconcile(self.s, self.settings, result["publication_id"], "retry_authorized", "operator checked only document existence")
+            confirmed = reconcile(self.s, self.settings, result["publication_id"], "retry_authorized",
+                "operator manually confirmed the configured member has edit permission",
+                {"document_member_granted": True})
+            self.assertEqual(confirmed["publication"]["document_member_status"], "granted")
+            self.assertEqual(confirmed["publication"]["document_member_verification"], "operator_confirmed")
+            self.assertIsNone(confirmed["publication"]["pending"])
+            self.assertEqual(self.send(retry=True)["status"], "completed")
+            self.task()
+            self.report = generate_report(self.s, self.p["id"], "2026-01-15")
+            self.assertEqual(self.send()["status"], "completed")
+            self.assertEqual(len(self.share_calls()), 1)
+            event = next(e for e in self.s.records("event") if e["data"].get("action") == "publication_resolution")
+            self.assertIs(event["data"]["remote_ids"]["document_member_granted"], True)
+
+    def test_manual_completed_share_confirmation_prevents_future_regrant(self):
+        with patch.dict(os.environ, {"WA_APPROVED_MEMBER": "ou_fixture"}):
+            result = self.unknown_share()
+            # An 8aa7bad journal has only the pending share stage, no member status.
+            prior = self.s.get(result["publication_id"])["data"]
+            prior.pop("document_member_status")
+            self.s.update_record(result["publication_id"], prior)
+            reconcile(self.s, self.settings, result["publication_id"], "completed",
+                "operator confirmed sharing and remaining publication remotely",
+                {"document_member_granted": True, "message_id": "operator-confirmed-message"})
+            self.assertTrue(self.send()["no_op"])
+            self.task()
+            self.report = generate_report(self.s, self.p["id"], "2026-01-15")
+            updated = self.send()
+            self.assertEqual(updated["status"], "completed")
+            self.assertEqual(updated["message_id"], "operator-confirmed-message")
+            self.assertEqual(len(self.share_calls()), 1)
+
+    def test_member_confirmation_rejects_wrong_types_identity_and_missing_audit(self):
+        with patch.dict(os.environ, {"WA_APPROVED_MEMBER": "ou_fixture"}):
+            result = self.unknown_share()
+            for value in (False, 1, "true", None):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    reconcile(self.s, self.settings, result["publication_id"], "retry_authorized", "manual check",
+                              {"document_member_granted": value})
+            with self.assertRaises(ValueError):
+                reconcile(self.s, self.settings, result["publication_id"], remote_ids={"document_member_granted": True})
+            with self.assertRaises(ValueError):
+                reconcile(self.s, self.settings, result["publication_id"], "retry_authorized", "",
+                          {"document_member_granted": True})
+            with self.assertRaises(ValueError):
+                reconcile(self.s, self.settings, result["publication_id"], "retry_authorized", "manual check",
+                          {"document_member_granted": True, "document_id": "different-doc"})
+            with self.assertRaises(ValueError):
+                reconcile(self.s, self.settings, result["publication_id"], "retry_authorized", "manual check",
+                          {"document_member_fingerprint": "arbitrary-hash"})
+            with patch.dict(os.environ, {"WA_APPROVED_MEMBER": "ou_other"}), self.assertRaises(ValueError):
+                reconcile(self.s, self.settings, result["publication_id"], "retry_authorized", "manual check",
+                          {"document_member_granted": True})
+            with self.assertRaises(ValueError):
+                self.send(retry=True)
+            self.assertEqual(len(self.share_calls()), 1)
+
+    def test_cancelled_unknown_share_still_requires_confirmation_before_retry(self):
+        with patch.dict(os.environ, {"WA_APPROVED_MEMBER": "ou_fixture"}):
+            result = self.unknown_share()
+            cancelled = reconcile(self.s, self.settings, result["publication_id"], "cancelled", "operator stops this publication")
+            self.assertEqual(cancelled["publication"]["document_member_status"], "outcome_unknown")
+            with self.assertRaises(ValueError):
+                self.send(retry=True)
+            self.assertEqual(len(self.share_calls()), 1)
 
     def test_document_config_rejects_group_member_and_invalid_permission(self):
         with self.assertRaises(ValueError):

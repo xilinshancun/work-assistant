@@ -169,6 +169,8 @@ python3 -m work_assistant publish REPORT_ID --confirm
 
 应用模式发送的卡片自动增加“打开 Daily Sync”原生按钮，指向 `https://www.feishu.cn/docx/{document_id}`。此标准入口采用[官方 CLI 的资源 URL 规则](https://github.com/larksuite/cli/blob/main/shortcuts/common/resource_url.go)，由飞书跳转至文档所属租户；打开后仍需具备文档访问权限。本地报告快照保持不变；Webhook 只有本地文档，不添加云文档按钮。
 
+升级前已完成的同内容报告仍保持 no-op，不因新增按钮而自动改写旧卡片；下一次报告内容变化时再正常更新已有资源并添加按钮。
+
 两个 transport 共用发布和 reconcile 状态机。CLI query 通过 `--params` 传入，JSON body 通过标准输入；原始 CLI 输出和凭证不会进入报告或错误记录。明确的认证、输入、权限拒绝记为 failed；写请求超时、进程中断、5xx 或损坏输出保留 unknown，禁止自动补发。认证探活失败发生在发布写入之前，可检查后显式 `--retry`。同内容仍无请求，变化内容更新已知文档和消息；换 transport 时应用与目的地必须保持一致。离线 FakeCLI 覆盖此协议和故障流程，不代表真实租户验收；live 权限和产物由使用者另行检查。
 
 ## 未知结果与恢复
@@ -183,6 +185,15 @@ python3 -m work_assistant publish REPORT_ID --confirm --retry
 ```
 
 先读 `task show` 的运行记录或 publish 返回的 publication_id。reconcile 不继续 agent，不补发卡片。写进程已启动但未成功结束，包括部分编辑后的权限拒绝，均进入 unknown；明确没有启动的二进制错误才可直接 failed。Codex 中间命令失败可以由该 turn 恢复，最终 `turn.completed` 成功仍有效；顶层 error/turn.failed 则拒绝。运行 unknown 只允许有理由的 completed/failed/cancelled 人工处理；该完成记录不可代替真实独立 review。中断的 routing 可用 `reconcile TASK_ID` 检查无活进程后恢复为 needs_user，随后显式 route。SIGTERM 会清理所拥有的子进程并保存未知状态；报告只有 OS 锁、整目录原子落盘，被 SIGKILL 后可重新生成，不需要人工解除持久 lease。获取飞书 token 失败发生在写请求之前，记录 failed，可显式 `--retry`；实际发送后的模糊结果仍为 unknown。发布核对读取已知远端 ID 的元信息与内容；缺失 ID 时请人工核对目标端，用 `--remote-ids '{"document_id":"...","message_id":"...","block_ids":["..."]}'` 提供已查到的对应资源，再决定 completed/retry_authorized/cancelled。不要凭没有本地 ID 推断远端没有效果。
+
+文档分享请求结果未知时，reconcile 的文档 GET 不能证明成员权限已生效，也不会额外申请读取成员权限的 scope。必须人工在飞书核对当前配置的用户和权限；若尚未授权，先人工完成授权。确认后使用精确 JSON 布尔值 `true`，保留配置中的成员、权限和目的地一致：
+
+```sh
+python3 -m work_assistant reconcile PUBLICATION_ID --resolution retry_authorized --reason '已人工确认当前配置用户拥有指定文档的 edit 权限' --remote-ids '{"document_member_granted":true}'
+python3 -m work_assistant publish REPORT_ID --confirm --retry
+```
+
+此确认会保存由可信配置计算的成员指纹和 `operator_confirmed` 来源，并审计理由；它是人工确认，不等于独立自动验证。未确认时不能继续或重发未知分享，即使先取消发布也一样。确认后继续剩余发布，后续报告更新不重复授权。仅当整条发布也已人工确认完成时才选 `completed`，必要时同时提供已查到的远端 ID；该路径同样保留成员确认，后续更新不会再次分享。
 
 ## Paseo 集成与验证范围
 
