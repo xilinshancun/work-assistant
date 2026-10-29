@@ -23,6 +23,15 @@ def root_ids(binding):
     return [i for day in binding['order'] for i in binding['sections'][day]['block_ids']]
 
 
+def guard_layout(store, binding):
+    if binding.get('layout_lock'):
+        raise NeedsUser('document layout is locked; flat timeline cannot modify or adopt its tree')
+    document_id = binding.get('document_id')
+    if document_id and any(r['data'].get('document_id') == document_id and r['data'].get('layout_lock')
+                           for r in store.records('publication', project_id=binding['project_id'])):
+        raise NeedsUser('document has an explicit publication layout_lock; tree support and explicit adoption required')
+
+
 def section_blocks(payload, period):
     if date.fromisoformat(period).isoformat() != period:
         raise ValueError('timeline period must be YYYY-MM-DD')
@@ -332,6 +341,9 @@ def publish_timeline(store, settings, report_id, confirm=False, transport=None, 
         # Reload both records only after acquiring the shared document lock.
         record=find_binding(store,key)
         prior=next((r for r in store.records('publication') if r['data']['identity']==identity),None)
+        if prior and prior['data'].get('layout_lock'):
+            raise NeedsUser('publication layout_lock prevents flat timeline publication')
+        if record:guard_layout(store, record['data'])
         if prior and prior['data'].get('layout')!='timeline':
             raise ValueError('existing per-period publication requires explicit publish adopt-timeline first')
         if record and record['data']['status'] in {'publishing','outcome_unknown','needs_user','cancelled'}:
@@ -431,6 +443,8 @@ def adopt_timeline(store,settings,publication_id,confirm=False,title=None,transp
     destination=client.destination();key=binding_key(destination,original['project_id'])
     with store.claim(['doc:'+key,'publish:'+original['data']['identity']]):
         original=store.get(publication_id);data=original['data']
+        if data.get('layout_lock'):
+            raise NeedsUser('locked document cannot be adopted by the flat timeline implementation')
         if data['destination']!=destination or data['status']!='completed' or not data.get('document_id') or not data.get('message_id'):
             raise ValueError('adoption requires matching completed app document and card')
         migration=data.get('document_migration')
@@ -479,6 +493,7 @@ def rename_timeline(store,settings,ident,title,confirm=False,retry=False,transpo
     client=make_client(settings,transport or http,base or BASE,process)
     with store.claim(['doc:'+record['data']['binding_id']]):
         record=store.get(ident);binding=record['data']
+        guard_layout(store, binding)
         if client.destination()!=binding['destination']:raise ValueError('timeline destination mismatch')
         if binding['status'] not in {'completed','retry_authorized','failed'} or binding.get('operation'):
             raise ValueError('unresolved timeline operation; reconcile before rename')
@@ -512,6 +527,7 @@ def reconcile_timeline(store,settings,ident,resolution=None,reason=None,remote_i
     client=make_client(settings,transport or http,base or BASE,process)
     with store.inspection_lock(resources):
         binding_record=store.get(binding_record['id']);binding=binding_record['data']
+        if resolution:guard_layout(store, binding)
         publication=store.get(pub_id) if pub_id else None
         if initial['kind']=='doc_binding' and binding.get('active_publication')!=pub_id:
             raise ValueError('timeline advanced before inspection lock; inspect the current binding again')

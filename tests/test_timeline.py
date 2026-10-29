@@ -347,3 +347,13 @@ class TimelineTests(Base):
         self.assertEqual(self.binding()['data']['sections']['2026-01-14']['block_ids'],old)
         self.assertEqual([b['block_id'] for b in self.server.blocks][-3:],old)
         self.assertEqual(len(self.server.blocks),59)
+
+    def test_layout_lock_protects_adoption_and_cross_day_flat_writes(self):
+        report=self.report();first=self.send(report)
+        data=self.s.get(first['publication_id'])['data'];data['layout_lock']={'reason':'user-owned native callout tree'}
+        self.s.update_record(first['publication_id'],data)
+        before=len(self.server.calls)
+        with self.assertRaises(ValueError):self.send(self.report('2026-01-16'))
+        with self.assertRaises(ValueError):adopt_timeline(self.s,self.settings,first['publication_id'],confirm=True,base=self.server.base)
+        with self.assertRaises(ValueError):rename_timeline(self.s,self.settings,first['binding_record_id'],'Other title',confirm=True,base=self.server.base)
+        self.assertEqual(len(self.server.calls),before)
