@@ -143,13 +143,18 @@ Evidence execution_date/report_date aliases require at least one and must agree.
 Optional source_mapping preserves section-to-existing-source-ID arrays as reported
 without inventing claims; missing items becomes an empty list. Missing source summary
 uses an explicit local UI placeholder, while id/verified_at remain required and raw
-source metadata stays private. Imported cards use the blue header template.
+source metadata stays private. Source mappings may also reference PR observations
+with required id/verified_at, with duplicate IDs rejected within/across both sets.
+Local evidence distinguishes source/pr_observation kinds; full PR metadata stays
+private, with no synthesized summary/claim or remote evidence appendix.
+Imported cards use the blue header template, a timezone-local short cutoff hint,
+and one whole plain_text div per summary paragraph; full coverage remains in documents.
 HTMLParser extracts the body title, unique sync-summary and complete readable body
 without active markup/navigation. Table cell/row boundaries and preformatted lines are
 preserved; optional paragraph/list/table end tags are handled, and ambiguous nesting
 is rejected. Only the first visible h1 supplies the title. Seven escaped standard outputs and an ordinary
 immutable report record reuse the existing publisher identity/checkpoints. External documents contain only display title, coverage and source body with its
-original qualifications; cards contain title, coverage and summary. Internal evidence
+original qualifications; cards contain title, short cutoff hint and summary paragraphs. Internal evidence
 and technical verification notes remain in local evidence.html/json only. Evidence
 summaries are bounded and attributed as reported; import-specific export checks
 reject recognizable credentials/local paths without rewriting ordinary parameter

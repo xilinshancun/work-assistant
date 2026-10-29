@@ -243,7 +243,10 @@ def _evidence_summary(evidence):
     mapping = evidence.get("source_mapping", {})
     if type(mapping) is not dict:
         raise ValueError("evidence source_mapping must be an object")
-    if len(sources) + len(items) + len(limitations) + len(mapping) > 1000:
+    observations = evidence.get("pr_observations", [])
+    if type(observations) is not list:
+        raise ValueError("evidence pr_observations must be a list")
+    if len(sources) + len(items) + len(limitations) + len(mapping) + len(observations) > 1000:
         raise ValueError("evidence exceeds 1000 entries")
     selected_sources, selected_items, ids = [], [], set()
     for source in sources:
@@ -255,8 +258,18 @@ def _evidence_summary(evidence):
         ids.add(ident)
         summary = (_text(source["summary"], "source summary") if "summary" in source
                    else "源未提供摘要 / No source summary supplied")
-        selected_sources.append({"id": ident, "summary": summary,
+        selected_sources.append({"id": ident, "kind": "source", "summary": summary,
                                  "verified_at": _text(source.get("verified_at"), "source verified_at", 100)})
+    selected_observations = []
+    for observation in observations:
+        if type(observation) is not dict:
+            raise ValueError("PR observation must be an object")
+        ident = _text(observation.get("id"), "PR observation id", 200)
+        if ident in ids:
+            raise ValueError("duplicate evidence source id across sources/PR observations")
+        ids.add(ident)
+        selected_observations.append({"id": ident, "kind": "pr_observation",
+            "verified_at": _text(observation.get("verified_at"), "PR observation verified_at", 100)})
     item_ids = set()
     for item in items:
         if type(item) is not dict:
@@ -271,6 +284,8 @@ def _evidence_summary(evidence):
                                "source_ids": refs, "grade": "reported"})
     selected = {"sources": selected_sources, "items": selected_items,
                 "limitations": [_text(v, "limitation") for v in limitations]}
+    if "pr_observations" in evidence:
+        selected["pr_observations"] = selected_observations
     if "source_mapping" in evidence:
         for section, refs in mapping.items():
             _text(section, "source_mapping section", 200)
@@ -293,6 +308,8 @@ def render_import(snapshot):
                        for i in selected["items"]]
     evidence_lines += ["%s: %s (source verified_at: %s; supplied by source)" %
                        (s["id"], s["summary"], s["verified_at"]) for s in selected["sources"]]
+    evidence_lines += ["%s [pr_observation] (source verified_at: %s; supplied by source)" %
+                       (s["id"], s["verified_at"]) for s in selected.get("pr_observations", [])]
     if "source_mapping" in selected:
         evidence_lines += ["章节来源映射 / Section source mapping (reported)"]
         evidence_lines += ["%s → %s" % (section, ", ".join(refs))
@@ -301,12 +318,14 @@ def render_import(snapshot):
     evidence_text = "\n".join(evidence_lines)
     plain = title + "\n" + interval + "\n\n" + body
     document = {"title": title, "children": document_blocks(plain)}
-    # Card limits never silently truncate the source summary. Split into native text elements.
-    card_text = interval + "\n" + summary
+    cutoff = _timestamp(coverage["covered_until"], "covered_until").astimezone(ZoneInfo(snapshot["timezone"]))
+    time_hint = cutoff.strftime("截至 %m-%d %H:%M")
+    # Text lines already preserve source paragraph boundaries. Keep each one whole.
+    summary_paragraphs = [line for line in summary.split("\n") if line]
     card = {"config": {"wide_screen_mode": True, "update_multi": True},
             "header": {"template": "blue", "title": {"tag": "plain_text", "content": title}},
-            "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": card_text[i:i + 1500]}}
-                         for i in range(0, len(card_text), 1500)]}
+            "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": text}}
+                         for text in [time_hint] + summary_paragraphs]}
 
     def paragraphs(text):
         return "".join("<p class='source-line'>" + escape(line) + "</p>" for line in text.split("\n"))
@@ -327,8 +346,10 @@ def render_import(snapshot):
             "evidence.html": page(header + "<p>" + escape(SCOPE) + "</p><section>" + paragraphs(evidence_text)
                                   + "</section><a href='index.html'>完整报告 / Full report</a>"),
             "evidence.json": dumps(snapshot), "card.json": dumps(card), "document.json": dumps(document),
-            "card-preview.html": page(header + "<section>" + paragraphs(summary)
-                                      + "</section><a href='index.html'>完整报告 / Full report</a>")}
+            "card-preview.html": page("<header style='background:#225abc;color:white'><h1>" + escape(title)
+                                      + "</h1><p>" + escape(time_hint) + "</p></header>"
+                                      + "".join("<section>" + paragraphs(text) + "</section>" for text in summary_paragraphs)
+                                      + "<a href='index.html'>完整报告 / Full report</a>")}
 
 
 def import_daily(store, project, source_root, period, timezone_name="Asia/Shanghai", title=None):
