@@ -78,21 +78,29 @@ def codex_mcp_preflight(argv, env, cwd, process=execute, timeout=10, pass_fds=()
             # does not escape a path component; only this ASCII subset is safe.
             if len(name) > 512 or re.fullmatch(r"[A-Za-z0-9_-]+", name) is None or name in names:
                 raise MCPPreflightError("Codex MCP preflight requires unique names matching [A-Za-z0-9_-]+; model execution blocked")
-            names[name] = server["enabled"]
+            transport = server.get("transport")
+            kind = transport.get("type") if type(transport) is dict else None
+            if type(kind) is not str or kind not in {"stdio", "streamable_http"}:
+                raise MCPPreflightError("Codex MCP preflight returned an unsupported transport type; model execution blocked")
+            # Retain only these safe scalars, never original command/url/env/auth.
+            names[name] = (server["enabled"], kind)
         latency_ms += result.latency_ms
         diagnostics.extend(result.diagnostics)
         return names
 
     initial = inspect([])
-    disabled = [name for name, enabled in initial.items() if enabled]
+    disabled = [name for name, (enabled, kind) in initial.items() if enabled]
     overrides = []
     for name in sorted(disabled):
         # A partial enabled=false table is rejected by Codex's override-layer
         # transport validation. Replace the entire server with a disabled stub.
-        overrides += ["-c", 'mcp_servers.%s={command="wa-mcp-disabled",enabled=false}' % name]
+        table = ('{command="wa-mcp-disabled",enabled=false}' if initial[name][1] == "stdio"
+                 else '{url="http://127.0.0.1:9/wa-disabled",enabled=false}')
+        overrides += ["-c", "mcp_servers.%s=%s" % (name, table)]
     verified = inspect(overrides)
-    if set(verified) != set(initial) or any(verified.values()):
-        raise MCPPreflightError("Codex MCP isolation verification failed: server set changed or a server remains enabled; model execution blocked")
+    if (set(verified) != set(initial) or any(enabled for enabled, kind in verified.values())
+            or any(verified[name][1] != initial[name][1] for name in initial)):
+        raise MCPPreflightError("Codex MCP isolation verification failed: server set/type changed or a server remains enabled; model execution blocked")
     return overrides, {"disabled_count": len(disabled), "server_count": len(initial), "verified": True,
                        "latency_ms": latency_ms, "diagnostics": diagnostics}
 
