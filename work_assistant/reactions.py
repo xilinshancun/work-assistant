@@ -32,6 +32,7 @@ class _Attempt:
         self.phase = "configuration"
         self.error_type = None
         self.argv_length = 0
+        self.read_retry_count = 0
 
     def remaining(self):
         if self.budget_s is None:
@@ -48,14 +49,21 @@ class _Attempt:
             self.phase = "configuration"
         elif args[:3] == ["api", "GET", "/open-apis/bot/v3/info"]:
             self.phase = "bot_authentication"
-        left = self.remaining()
-        if left is not None:
-            kwargs["timeout"] = min(kwargs["timeout"], left)
-        try:
-            result = self.process(argv, stdin, **kwargs)
-        except BaseException as exc:
-            self.error_type = _error_type(exc)
-            raise
+        while True:
+            left = self.remaining()
+            if left is not None:
+                kwargs["timeout"] = min(kwargs["timeout"], left)
+            try:
+                result = self.process(argv, stdin, **kwargs)
+            except BaseException as exc:
+                self.error_type = _error_type(exc)
+                raise
+            if (self.budget_s is not None and self.read_retry_count == 0
+                    and args[:2] == ["api", "GET"] and _read_transport_failure(result)):
+                self.remaining()  # No second subprocess after the deadline.
+                self.read_retry_count += 1
+                continue
+            break
         for field, category in (("timed_out", "timeout"), ("truncated", "output_limit"),
                                 ("invalid_utf8", "invalid_utf8")):
             if getattr(result, field):
@@ -69,7 +77,21 @@ class _Attempt:
         return {"phase": self.phase,
                 "error_type": self.error_type or (_error_type(exc) if exc is not None else None),
                 "elapsed_ms": max(0, round((self.clock() - self.started) * 1000)),
-                "budget_s": self.budget_s}
+                "budget_s": self.budget_s, "read_retry_count": self.read_retry_count}
+
+
+def _read_transport_failure(result):
+    """Only the CLI's explicit network/transport envelope permits one GET retry."""
+    if (result.returncode <= 0 or result.timed_out or result.truncated or result.invalid_utf8):
+        return False
+    try:
+        value = LarkCLI._json(result.stderr)
+    except AmbiguousError:
+        return False
+    error = value.get("error") if type(value) is dict else None
+    return (type(value) is dict and value.get("ok") is False
+            and value.get("identity") in (None, "bot") and type(error) is dict
+            and error.get("type") == "network" and error.get("subtype") == "transport")
 
 
 def _error_type(exc):

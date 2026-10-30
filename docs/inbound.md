@@ -223,14 +223,18 @@ chat, emoji, bot identity and app. The shared [reaction CLI](messages.md#bot-rea
 validates the source, adopts an existing app+emoji reaction or records POST intent
 before adding it, then verifies the same reaction ID by paginated GET. A failed or
 unknown reaction does not block DS, GPT or the final quote; there is no fallback
-text acknowledgement, automatic retry, removal or progress-reaction sequence.
+text acknowledgement, automatic POST retry, removal or progress-reaction sequence.
 Inbound acknowledgements have one 10-second budget across configuration, bot
 authentication, source/list preflight, POST and GET readback. Each CLI call gets
 only the remaining time; process cleanup and local journal writes may add a short
 tail. Final-answer sends retain their normal timeout. A preflight deadline ends
 without POST; a deadline after POST intent remains unknown and is never replayed.
-Failures record only a fixed phase, error category and elapsed time, never raw CLI
-stderr. A failed reaction can leave no visible acknowledgement; the answer still
+Within that same budget, at most one GET may be retried when the CLI explicitly
+reports `ok=false` and `network/transport`. No POST, identity/validation rejection,
+unstructured error or ordinary CLI call receives this retry. The retry gets only
+the remaining time; an exhausted budget cannot start another subprocess.
+Diagnostics record only a fixed phase, error category, elapsed time and read retry
+count, never raw CLI stderr. A failed reaction can leave no visible acknowledgement; the answer still
 continues, so this budget does not guarantee that the emoji will appear during an
 API outage.
 `inbound inspect` can perform GET-only inspection of its known shared action.
