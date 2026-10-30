@@ -1,5 +1,6 @@
 """A thin one-shot entry over the existing task commands; no scheduler or grants."""
 import sqlite3
+import sys
 from datetime import date
 from .policy import authorize
 from .routing import route_task
@@ -20,6 +21,20 @@ def ask_task(store, providers, project, goal, intent="read", provider=None, revi
         current = store.task(ident)
         result.update(status=status or current["status"], task_status=current["status"],
                       goal_status=current["goal_status"], diagnostic=diagnostic or current["blockers"])
+        if result["status"] != "completed":
+            # Guidance is data only: never probe providers or repeat work while
+            # explaining a failed/unknown result. Use the same installed runtime.
+            command = [sys.executable, "-m", "work_assistant", "--config",
+                       providers.config.get("config_path", "config.local.json")]
+            result["next_steps"] = [{"action": "inspect_task", "argv": command + ["task", "show", ident]}]
+            if result["stage"] == "route":
+                result["next_steps"].append({"action": "check_provider_readiness", "argv": command + ["doctor", "--json"],
+                    "note": "Inspect local CLI compatibility and authenticate providers separately; DSH is optional, Codex is required for GPT fallback. Continue the existing task after correcting setup."})
+            if result["status"] == "outcome_unknown":
+                run_id = next((step["id"] for step in reversed(result["steps"]) if step["kind"] in {"run", "review"}), None)
+                if run_id:
+                    result["next_steps"].append({"action": "inspect_unknown_run", "argv": command + ["reconcile", run_id],
+                        "note": "Read-only inspection; preserve the unknown outcome before considering any new action."})
         return result
 
     try:
