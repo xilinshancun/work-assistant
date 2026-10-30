@@ -19,11 +19,19 @@ def reaction(ident="reaction_synthetic", operator="cli_fixture", kind="app", emo
             "action_time": "1700000000000", "reaction_type": {"emoji_type": emoji}}
 
 
+def transport_error(**changes):
+    envelope={'ok':False,'identity':'bot','error':{'type':'network','subtype':'transport',
+        'message':'private-server-error-never-persisted'}}
+    envelope.update(changes)
+    return ProcessResult('',dumps(envelope),returncode=1)
+
+
 class FakeCLI:
     def __init__(self, case):
         self.case=case;self.calls=[];self.items=[];self.source_changes={};self.pages=None
         self.post_error=None;self.apply=True;self.ack_changes={};self.list_error=False
         self.post_list_error=False
+        self.failures={}
 
     def __call__(self, argv, stdin, **kwargs):
         args=argv[3:];self.calls.append((args,stdin))
@@ -33,6 +41,8 @@ class FakeCLI:
             return ProcessResult(dumps({'appId':'cli_fixture','brand':'feishu'}))
         self.case.assertEqual(args[0],'api');self.case.assertEqual(args[args.index('--as')+1],'bot')
         method,path=args[1:3]
+        failures=self.failures.get((method,path),[])
+        if failures:return failures.pop(0)
         if path=='/open-apis/bot/v3/info':data={'open_id':'ou_bot'}
         elif path=='/open-apis/im/v1/messages/om_source':
             data={'items':[dict({'message_id':'om_source','chat_id':'oc_fixture','deleted':False,
@@ -65,6 +75,24 @@ class FakeCLI:
         return ProcessResult(dumps({'ok':True,'identity':'bot','data':data}))
 
     def posts(self):return [c for c in self.calls if c[0][:2]==['api','POST']]
+
+
+class TimedCLI:
+    """Deterministic subprocess durations that honor the passed timeout."""
+    def __init__(self, cli, durations):
+        self.cli=cli;self.durations=iter(durations);self.now=0;self.timeouts=[]
+
+    def clock(self):return self.now
+
+    def __call__(self, argv, stdin, **kwargs):
+        duration=next(self.durations)
+        self.timeouts.append(kwargs['timeout'])
+        self.now+=min(duration,kwargs['timeout'])
+        if duration>kwargs['timeout']:
+            # Record the launched call even though its outcome is unavailable.
+            self.cli.calls.append((argv[3:],stdin))
+            return ProcessResult(timed_out=True)
+        return self.cli(argv,stdin,**kwargs)
 
 
 class ReactionTests(unittest.TestCase):
@@ -164,6 +192,117 @@ class ReactionTests(unittest.TestCase):
         self.cli.source_changes={};self.cli.list_error=True
         self.assertEqual(self.add('failed-list')['status'],'failed');self.assertEqual(self.cli.posts(),[])
 
+    def test_one_budget_caps_each_preflight_call_and_never_starts_post_on_timeout(self):
+        timed=TimedCLI(self.cli,[1,2,3,5])
+        result=reactions.add(self.store,self.settings,'bounded-preflight','oc_fixture','om_source',
+                             confirm=True,process=timed,budget_s=10,clock=timed.clock)
+        self.assertEqual(timed.timeouts,[10,9,7,4])
+        self.assertEqual(result['status'],'failed');self.assertIsNone(result['post_intent'])
+        self.assertEqual(result['diagnostic'],{'phase':'list','error_type':'timeout','elapsed_ms':10000,'budget_s':10,
+                                              'read_retry_count':0})
+        self.assertEqual(self.cli.posts(),[])
+        calls=len(self.cli.calls)
+        self.assertTrue(reactions.add(self.store,self.settings,'bounded-preflight','oc_fixture','om_source',
+            confirm=True,process=timed,budget_s=10,clock=timed.clock)['no_op'])
+        self.assertEqual(len(self.cli.calls),calls)
+
+    def test_deadline_after_successful_preflight_prevents_even_post_intent(self):
+        timed=TimedCLI(self.cli,[1,2,3,4])
+        result=reactions.add(self.store,self.settings,'exact-preflight','oc_fixture','om_source',
+                             confirm=True,process=timed,budget_s=10,clock=timed.clock)
+        self.assertEqual(result['status'],'failed');self.assertIsNone(result['post_intent'])
+        self.assertEqual(result['diagnostic']['error_type'],'budget_exhausted');self.assertEqual(self.cli.posts(),[])
+
+    def test_post_and_readback_deadlines_preserve_unknown_without_second_post(self):
+        for index, duration in enumerate((20,6)):
+            cli=FakeCLI(self);timed=TimedCLI(cli,[1,1,1,1,duration])
+            request='bounded-post-'+str(index)
+            emoji='Get' if index==0 else 'OK'
+            result=reactions.add(self.store,self.settings,request,'oc_fixture','om_source',emoji,
+                                 confirm=True,process=timed,budget_s=10,clock=timed.clock)
+            self.assertEqual(result['status'],'outcome_unknown');self.assertIsNotNone(result['post_intent'])
+            self.assertEqual(result['diagnostic']['phase'],'post' if index==0 else 'readback')
+            self.assertEqual(result['diagnostic']['error_type'],'timeout' if index==0 else 'budget_exhausted')
+            self.assertEqual(result['diagnostic']['elapsed_ms'],10000)
+            self.assertEqual(len(cli.posts()),1)
+            self.assertTrue(reactions.add(self.store,self.settings,request,'oc_fixture','om_source',emoji,
+                confirm=True,process=timed,budget_s=10,clock=timed.clock)['no_op'])
+            restored=reactions.inspect(self.store,self.settings,result['action_id'],process=cli)
+            self.assertEqual(restored['status'],'outcome_unknown' if index==0 else 'completed')
+            self.assertEqual(len(cli.posts()),1)
+
+    def test_budget_is_optional_and_final_diagnostics_exclude_raw_errors(self):
+        timed=TimedCLI(self.cli,[1,1,1,1,1,1])
+        result=reactions.add(self.store,self.settings,'default-timeouts','oc_fixture','om_source',
+                             confirm=True,process=timed,clock=timed.clock)
+        self.assertEqual(result['status'],'completed');self.assertEqual(timed.timeouts,[30]*6)
+        self.assertIsNone(result['diagnostic']['budget_s'])
+        def broken(argv,stdin,**kwargs):
+            if argv[3:]==['config','show']:return self.cli(argv,stdin,**kwargs)
+            raise OSError('secret-marker-do-not-store')
+        failed=reactions.add(self.store,self.settings,'diagnostic-synthetic','oc_fixture','om_source','OK',
+                             confirm=True,process=broken)
+        self.assertEqual(failed['diagnostic']['phase'],'bot_authentication')
+        self.assertEqual(failed['diagnostic']['error_type'],'os_error')
+        self.assertNotIn('secret-marker',dumps(self.store.records()))
+        self.assertNotIn('private-source-marker',dumps(self.store.records()))
+
+    def test_typed_read_transport_failure_retries_once_with_remaining_budget_then_one_post(self):
+        path='/open-apis/im/v1/messages/om_source'
+        self.cli.failures[('GET',path)]=[transport_error()]
+        timed=TimedCLI(self.cli,[1,1,2,1,1,1,1])
+        result=reactions.add(self.store,self.settings,'read-recovered','oc_fixture','om_source',
+                             confirm=True,process=timed,budget_s=10,clock=timed.clock)
+        self.assertEqual(result['status'],'completed');self.assertEqual(len(self.cli.posts()),1)
+        self.assertEqual(timed.timeouts,[10,9,8,6,5,4,3])
+        self.assertEqual(result['diagnostic']['read_retry_count'],1)
+        self.assertIsNone(result['diagnostic']['error_type'])
+        self.assertNotIn('private-server-error',dumps(self.store.records()))
+
+    def test_read_transport_retry_limit_is_global_not_per_get(self):
+        self.cli.failures[('GET','/open-apis/bot/v3/info')]=[transport_error()]
+        self.cli.failures[('GET','/open-apis/im/v1/messages/om_source')]=[transport_error()]
+        timed=TimedCLI(self.cli,[1,1,1,1])
+        result=reactions.add(self.store,self.settings,'one-read-retry','oc_fixture','om_source',
+                             confirm=True,process=timed,budget_s=10,clock=timed.clock)
+        self.assertEqual(result['status'],'failed');self.assertEqual(self.cli.posts(),[])
+        self.assertEqual(len(self.cli.calls),4);self.assertEqual(result['diagnostic']['read_retry_count'],1)
+        self.assertEqual(result['diagnostic']['phase'],'source')
+        self.assertEqual(result['diagnostic']['error_type'],'cli_failed')
+
+    def test_network_result_at_deadline_does_not_start_read_retry(self):
+        self.cli.failures[('GET','/open-apis/im/v1/messages/om_source')]=[transport_error()]
+        timed=TimedCLI(self.cli,[1,1,8])
+        result=reactions.add(self.store,self.settings,'no-retry-time','oc_fixture','om_source',
+                             confirm=True,process=timed,budget_s=10,clock=timed.clock)
+        self.assertEqual(result['status'],'failed');self.assertEqual(len(self.cli.calls),3)
+        self.assertEqual(result['diagnostic']['error_type'],'budget_exhausted')
+        self.assertEqual(result['diagnostic']['read_retry_count'],0);self.assertEqual(self.cli.posts(),[])
+
+    def test_post_transport_failure_is_unknown_with_one_post_and_no_retry(self):
+        self.cli.failures[('POST','/open-apis/im/v1/messages/om_source/reactions')]=[transport_error()]
+        timed=TimedCLI(self.cli,[1,1,1,1,1])
+        result=reactions.add(self.store,self.settings,'post-network','oc_fixture','om_source',
+                             confirm=True,process=timed,budget_s=10,clock=timed.clock)
+        self.assertEqual(result['status'],'outcome_unknown');self.assertEqual(len(self.cli.posts()),1)
+        self.assertEqual(result['diagnostic']['phase'],'post');self.assertEqual(result['diagnostic']['read_retry_count'],0)
+        self.assertTrue(reactions.add(self.store,self.settings,'post-network','oc_fixture','om_source',
+            confirm=True,process=timed,budget_s=10,clock=timed.clock)['no_op'])
+        self.assertEqual(len(self.cli.posts()),1)
+
+    def test_unbudgeted_or_untyped_or_wrong_identity_errors_are_not_retried(self):
+        errors=[(None,transport_error()),(10,ProcessResult('', '{invalid json', returncode=1)),
+                (10,transport_error(identity='user')),
+                (10,transport_error(error={'type':'authorization','subtype':'permission_denied'})),
+                (10,ProcessResult('', '{"ok":false,"ok":false,"error":{"type":"network","subtype":"transport"}}',returncode=1))]
+        for index,(budget,error) in enumerate(errors):
+            cli=FakeCLI(self);cli.failures[('GET','/open-apis/im/v1/messages/om_source')]=[error]
+            timed=TimedCLI(cli,[1,1,1])
+            result=reactions.add(self.store,self.settings,'nonretry-'+str(index),'oc_fixture','om_source',
+                                 confirm=True,process=timed,budget_s=budget,clock=timed.clock)
+            self.assertEqual(result['status'],'failed');self.assertEqual(len(cli.calls),3)
+            self.assertEqual(result['diagnostic']['read_retry_count'],0);self.assertEqual(cli.posts(),[])
+
     def test_invalid_or_partial_pagination_cannot_authorize_post_or_adopt(self):
         pagesets=[[{'items':[],'has_more':True,'page_token':''}],
                   [{'items':[reaction()],'has_more':True,'page_token':'0'}],
@@ -231,6 +370,7 @@ class ReactionInboundTests(unittest.TestCase):
         original=reactions.add
         def shared_add(*args,**kwargs):
             self.assertEqual(len(self.ds.calls),0)
+            self.assertEqual(kwargs['budget_s'],10)
             return original(*args,process=cli,**kwargs)
         with patch('work_assistant.inbound.reactions.add',side_effect=shared_add),patch('work_assistant.lark_cli.time.sleep'):
             record=self.accept(message_id='om_source',chat_type='group',mentions=[{'id':'ou_bot'}])
@@ -240,6 +380,23 @@ class ReactionInboundTests(unittest.TestCase):
         receipt=done['data']['ack_reaction_receipt']
         self.assertEqual(receipt['status'],'completed');self.assertEqual(receipt['verification_status'],'verified')
         self.assertEqual(self.store.get(receipt['action_id'])['kind'],reactions.KIND)
+
+    def test_default_reaction_budget_exhaustion_continues_ds_and_final_exactly_once(self):
+        cli=FakeCLI(self);timed=TimedCLI(cli,[1,2,3,5])
+        self.conf['publisher'].update(cli_argv=['synthetic-lark'],cli_profile='fixture',cli_config_dir=str(self.root))
+        self.engine=self.new_engine();self.engine.reactor=self.engine._react
+        original=reactions.add
+        def shared_add(*args,**kwargs):
+            self.assertEqual(len(self.ds.calls),0);self.assertEqual(kwargs['budget_s'],10)
+            return original(*args,process=timed,clock=timed.clock,**kwargs)
+        with patch('work_assistant.inbound.reactions.add',side_effect=shared_add),patch('work_assistant.lark_cli.time.sleep'):
+            record=self.accept(message_id='om_source',chat_type='group',mentions=[{'id':'ou_bot'}])
+            done=self.engine.advance(record);self.engine.advance(done)
+        self.assertEqual(done['data']['status'],'completed');self.assertEqual(len(cli.posts()),0)
+        self.assertEqual(len(self.ds.calls),1);self.assertEqual(len(self.replies),1)
+        self.assertEqual(done['data']['ack_reaction_receipt']['diagnostic']['phase'],'list')
+        self.assertEqual(done['data']['ack_reaction_receipt']['diagnostic']['elapsed_ms'],10000)
+        self.assertFalse(done['data']['final_delivery']['reply_in_thread'])
 
     def test_escalation_has_reaction_and_no_text_ack_then_final_despite_failed_or_unknown_reaction(self):
         for index, status in enumerate(('failed','outcome_unknown')):
