@@ -1,5 +1,4 @@
 """Public offline evaluation entry: real CLI, isolated fixtures, no live services."""
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,9 +9,7 @@ import unittest
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "evaluate.py"
-spec = importlib.util.spec_from_file_location("offline_evaluator", SCRIPT)
-evaluation = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(evaluation)
+from work_assistant import evaluation
 
 
 class EvaluationTests(unittest.TestCase):
@@ -27,13 +24,17 @@ class EvaluationTests(unittest.TestCase):
         destination = self.root / "new-receipt"
         env = dict(os.environ, HOME=str(home), FEISHU_APP_SECRET="private-secret-marker",
                    OPENAI_API_KEY="private-key-marker", CODEX_HOME=str(home),
-                   PYTHONPATH=str(home), PASEO_AGENT_CWD="private-paseo-marker")
+                   PYTHONPATH=str(home), PASEO_AGENT_CWD="private-paseo-marker",
+                   # Apple's Python writes stdlib bytecode into HOME/Library
+                   # even for `python -c pass`, before the evaluator starts.
+                   PYTHONDONTWRITEBYTECODE="1")
         result = subprocess.run([sys.executable, str(SCRIPT), "--output", str(destination)],
                                 cwd=cwd, env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         receipt = json.loads(result.stdout)
         self.assertEqual(receipt["schema"], "wa.evaluation.v1");self.assertEqual(receipt["status"], "passed")
         self.assertEqual(receipt["scope"]["data"], "synthetic");self.assertFalse(receipt["scope"]["live_tested"])
+        self.assertEqual(receipt["scope"]["entry_point"], "source_script")
         self.assertEqual(receipt["summary"], {"passed": 4, "failed": 0, "skipped": 0})
         self.assertEqual(json.loads((destination / "receipt.json").read_text()), receipt)
         checks = {c["id"]: c for c in receipt["checks"]}

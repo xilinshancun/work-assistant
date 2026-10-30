@@ -29,6 +29,12 @@ def parser():
     doctor.add_argument("--json", action="store_true")
     d = commands.add_parser("demo")
     d.add_argument("--output", default="out/demo")
+    e = commands.add_parser("evaluate", help="Account-free offline evaluation; synthetic data, no live calls",
+                            description="Run four offline CLI checks with synthetic data and no accounts, providers or live calls.")
+    e.add_argument("--output", help="Retain receipt.json and synthetic artifacts in a NEW directory; default success cleans temporary output")
+    e = commands.add_parser("example", help="Create the three-file synthetic first-project inspection exercise; no models or config",
+                            description="Create three synthetic practice files with an intentional README count mismatch (3 vs 5). No models or configuration are accessed.")
+    e.add_argument("--output", required=True, help="NEW workspace directory; existing files, directories and symlinks are refused")
     a = commands.add_parser("ask", help="Create, route and run one task; stops on unresolved outcomes")
     a.add_argument("project")
     a.add_argument("goal")
@@ -198,7 +204,13 @@ def _main(argv=None):
     if args.command == "ask" and args.routing == "direct" and args.provider is None:
         command_parser.error("ask --routing direct requires --provider")
     try:
-        if args.command == "demo":
+        if args.command == "evaluate":
+            from .evaluation import main as evaluate_main
+            return evaluate_main(["--output", args.output] if args.output is not None else [], entry_point="wa_evaluate")
+        if args.command == "example":
+            from .example import create_example
+            result = create_example(args.output)
+        elif args.command == "demo":
             result = demo(args.output)
         else:
             conf = config.init(args.config) if args.command == "init" else config.load(args.config)

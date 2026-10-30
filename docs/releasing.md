@@ -159,6 +159,25 @@ and [GitHub Actions publishing guide](https://packaging.python.org/en/latest/gui
    README installation path. Attach the validated distributions to the matching
    GitHub prerelease; do not rebuild different files for it.
 
+To run validation without uploading:
+
+```sh
+gh workflow run release.yml --ref v0.1.0a1 \
+  -f version=0.1.0a1 -f tag=v0.1.0a1 -f publish=false
+```
+
+After the account binding and release review, explicitly publish:
+
+```sh
+gh workflow run release.yml --ref v0.1.0a1 \
+  -f version=0.1.0a1 -f tag=v0.1.0a1 -f publish=true
+```
+
+The latter dispatch performs its own build and full validation before it can
+upload. Inspect that run's manifest: do not substitute hashes from an earlier
+validation-only run. The publish job rejects workflow re-runs; inspect any
+uncertain upload before starting a new dispatch.
+
 The Alpha command is `pipx install local-work-assistant==0.1.0a1`; a virtual
 environment can instead use `python -m pip install local-work-assistant==0.1.0a1`.
 Pinning the version avoids relying on a resolver's default prerelease policy.
