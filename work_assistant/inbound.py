@@ -184,7 +184,7 @@ class Engine:
         return raw.decode('utf-8')
 
     def _react(self,request,chat,message,emoji):
-        return reactions.add(self.store,self.conf['publisher'],request,chat,message,emoji,confirm=True)
+        return reactions.add(self.store,self.conf['publisher'],request,chat,message,emoji,confirm=True,budget_s=10)
 
     def acknowledge(self,record):
         """One independent, best-effort acknowledgement before any classifier call."""

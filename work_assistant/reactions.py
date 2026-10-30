@@ -1,13 +1,15 @@
 """Explicit bot acknowledgements, with durable intent and GET-only recovery."""
 import json
+import math
 import sqlite3
 import sys
+import time
 from urllib.parse import quote, urlencode
 
 from . import config, messages
 from .feishu import APIError, AmbiguousError
 from .lark_cli import LarkCLI
-from .process import TerminationRequested, termination_guard
+from .process import ProcessLaunchError, TerminationRequested, execute, termination_guard
 from .store import Busy, Store
 from .util import digest, now
 
@@ -18,6 +20,69 @@ UNRESOLVED = {"preparing", "sending", "outcome_unknown", "verification_pending"}
 
 class ReactionError(ValueError):
     pass
+
+
+class _Attempt:
+    """One optional wall-clock budget, with no raw CLI output in diagnostics."""
+    def __init__(self, process, budget_s, clock):
+        self.process = process or execute
+        self.budget_s = budget_s
+        self.clock = clock
+        self.started = clock()
+        self.phase = "configuration"
+        self.error_type = None
+        self.argv_length = 0
+
+    def remaining(self):
+        if self.budget_s is None:
+            return None
+        left = self.budget_s - (self.clock() - self.started)
+        if left <= 0:
+            self.error_type = "budget_exhausted"
+            raise TimeoutError("reaction budget exhausted")
+        return left
+
+    def __call__(self, argv, stdin, **kwargs):
+        args = argv[self.argv_length:]
+        if args == ["config", "show"]:
+            self.phase = "configuration"
+        elif args[:3] == ["api", "GET", "/open-apis/bot/v3/info"]:
+            self.phase = "bot_authentication"
+        left = self.remaining()
+        if left is not None:
+            kwargs["timeout"] = min(kwargs["timeout"], left)
+        try:
+            result = self.process(argv, stdin, **kwargs)
+        except BaseException as exc:
+            self.error_type = _error_type(exc)
+            raise
+        for field, category in (("timed_out", "timeout"), ("truncated", "output_limit"),
+                                ("invalid_utf8", "invalid_utf8")):
+            if getattr(result, field):
+                self.error_type = category
+                break
+        if self.error_type is None and result.returncode:
+            self.error_type = "interrupted" if result.returncode < 0 else "cli_failed"
+        return result
+
+    def diagnostic(self, exc=None):
+        return {"phase": self.phase,
+                "error_type": self.error_type or (_error_type(exc) if exc is not None else None),
+                "elapsed_ms": max(0, round((self.clock() - self.started) * 1000)),
+                "budget_s": self.budget_s}
+
+
+def _error_type(exc):
+    # Fixed categories only: exception text, dynamic class names and server
+    # stderr can contain credentials or user content and are never persisted.
+    for cls, category in ((ProcessLaunchError, "launch_failed"),
+                          ((KeyboardInterrupt, SystemExit), "interrupted"),
+                          (AmbiguousError, "ambiguous_response"), (APIError, "api_error"),
+                          (TimeoutError, "timeout"), (OSError, "os_error"),
+                          (ValueError, "validation_error")):
+        if isinstance(exc, cls):
+            return category
+    return "unexpected_error"
 
 
 def validate(settings, chat_id, message_id, emoji):
@@ -46,7 +111,7 @@ def _find(store, ident):
 def _receipt(record, no_op=False):
     fields = ("request_id", "status", "verification_status", "expected_app_id", "identity", "chat_id",
               "message_id", "emoji_type", "target_hash", "reaction_id", "post_intent", "adopted_existing",
-              "verification_basis", "error", "verified_at", "last_readback")
+              "verification_basis", "error", "verified_at", "last_readback", "diagnostic")
     return dict({key: record["data"].get(key) for key in fields}, action_id=record["id"], no_op=no_op)
 
 
@@ -113,10 +178,15 @@ def list_reactions(settings, chat_id, message_id, emoji="Get", process=None):
             "items": _matches(client, message_id, client.app_id(), emoji)}
 
 
-def add(store, settings, request_id, chat_id, message_id, emoji="Get", confirm=False, process=None):
+def add(store, settings, request_id, chat_id, message_id, emoji="Get", confirm=False, process=None,
+        budget_s=None, clock=time.monotonic):
     validate(settings, chat_id, message_id, emoji)
     if type(confirm) is not bool:
         raise ReactionError("confirm must be an explicit boolean")
+    if budget_s is not None and (type(budget_s) not in (int, float) or not math.isfinite(budget_s)
+                                 or not 0 < budget_s <= 300):
+        raise ReactionError("reaction budget must be a finite positive number up to 300 seconds")
+    attempt = _Attempt(process, budget_s, clock)
     ident = action_id(request_id)
     app = settings["expected_app_id"]
     target = digest(["reaction", "bot", app, chat_id, message_id, emoji])
@@ -138,37 +208,50 @@ def add(store, settings, request_id, chat_id, message_id, emoji="Get", confirm=F
                 "emoji_type": emoji, "target_hash": target, "status": "preparing", "verification_status": "not_added",
                 "reaction_id": None, "post_intent": None}, ident=ident)
         try:
-            client = LarkCLI(settings, process=process)
+            client = LarkCLI(settings, process=attempt)
+            attempt.argv_length = len(client.argv)
             client.authenticate()
+            attempt.phase = "source"
             source = messages._reply_source(client, message_id, chat_id)
+            attempt.phase = "list"
             matches = _matches(client, message_id, app, emoji)
             record = messages._save(store, record, source=source)
+            # If the read-only preflight used the budget, do not create a POST
+            # intent. A deadline crossed after intent remains unknown below.
+            if not matches:
+                attempt.remaining()
         except BaseException as exc:
             record = messages._save(store, record, status="failed", verification_status="not_added",
-                                    error="reaction_preflight_failed; no reaction POST started")
+                                    error="reaction_preflight_failed; no reaction POST started",
+                                    diagnostic=attempt.diagnostic(exc))
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             return _receipt(record)
         if matches:
             return _receipt(messages._save(store, record, status="completed", verification_status="verified",
                 reaction_id=matches[0]["reaction_id"], adopted_existing=True, verified_at=now(),
-                verification_basis="existing_app_emoji_observed_in_complete_list"))
+                verification_basis="existing_app_emoji_observed_in_complete_list",
+                diagnostic=attempt.diagnostic()))
         body = {"reaction_type": {"emoji_type": emoji}}
         intent = {"method": "POST", "path": _path(message_id), "body_hash": digest(body), "at": now()}
         record = messages._save(store, record, status="sending", verification_status="unresolved", post_intent=intent)
         try:
+            attempt.phase = "post"
             item = _item(client.request("POST", _path(message_id), body))
             if item["operator_type"] != "app" or item["operator_id"] != app or item["emoji_type"] != emoji:
                 raise AmbiguousError("reaction acknowledgement identity/type mismatch")
             record = messages._save(store, record, reaction_id=item["reaction_id"], status="verification_pending")
+            attempt.phase = "readback"
             matches = _matches(client, message_id, app, emoji)
             if not any(match["reaction_id"] == item["reaction_id"] for match in matches):
                 raise AmbiguousError("acknowledged reaction not found in complete readback")
             return _receipt(messages._save(store, record, status="completed", verification_status="verified",
-                adopted_existing=False, verified_at=now(), verification_basis="acknowledged_app_emoji_and_same_list_id", error=None))
+                adopted_existing=False, verified_at=now(), verification_basis="acknowledged_app_emoji_and_same_list_id",
+                error=None, diagnostic=attempt.diagnostic()))
         except BaseException as exc:
             record = messages._save(store, record, status="outcome_unknown", verification_status="unresolved",
-                                    error="reaction_outcome_unknown; inspect only, never automatically repeat POST")
+                                    error="reaction_outcome_unknown; inspect only, never automatically repeat POST",
+                                    diagnostic=attempt.diagnostic(exc))
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             return _receipt(record)
