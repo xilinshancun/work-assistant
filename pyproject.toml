@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,11 +8,34 @@ version = "0.1.0"
 description = "Local-first personal assistant with durable evidence and explicit publishing"
 readme = "README.md"
 requires-python = ">=3.9"
-license = {file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = []
+authors = [{name = "Work Assistant contributors"}]
+keywords = ["local-first", "assistant", "cli", "evidence", "reports"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+]
+
+[project.urls]
+Homepage = "https://github.com/xilinshancun/work-assistant"
+Documentation = "https://github.com/xilinshancun/work-assistant#readme"
+Repository = "https://github.com/xilinshancun/work-assistant"
+Issues = "https://github.com/xilinshancun/work-assistant/issues"
+Changelog = "https://github.com/xilinshancun/work-assistant/blob/main/CHANGELOG.md"
+Security = "https://github.com/xilinshancun/work-assistant/security/policy"
 
 [project.scripts]
 wa = "work_assistant.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["work_assistant*"]
+namespaces = false

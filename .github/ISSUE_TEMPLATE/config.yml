@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security reporting instructions
+    url: https://github.com/xilinshancun/work-assistant/security/policy
+    about: Read the reporting policy before sharing sensitive details. Public issues are not a private channel.
+  - name: Setup and contribution guide
+    url: https://github.com/xilinshancun/work-assistant/blob/main/CONTRIBUTING.md
+    about: Offline checks, installation reproduction details, and contribution expectations.

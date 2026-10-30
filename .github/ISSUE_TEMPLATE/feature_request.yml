@@ -1,0 +1,25 @@
+name: Feature request
+description: Describe a use case and a bounded improvement before implementation.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and use case
+      description: Explain the task with a synthetic example; no private project history is needed.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior and alternatives
+      description: Describe expected commands/results and any new permissions or external effects.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: I checked existing issues and kept private data out of this request.
+          required: true

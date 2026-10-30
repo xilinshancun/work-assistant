@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a reproducible installation or behavior problem with synthetic data.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For sensitive security issues, follow [SECURITY.md](https://github.com/xilinshancun/work-assistant/security/policy).
+        Do not paste credentials, private configs, company material, message IDs, or runtime databases here.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Package version/commit, OS/architecture, Python version, and source/wheel/sdist installation method.
+      placeholder: "Synthetic example: source checkout, Linux x86_64, Python 3.12"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal synthetic reproduction
+      description: Exact commands and small made-up input. Remove personal paths and identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+      description: Include sanitized error text and whether an external action might already have happened. Do not retry unknown actions to reproduce them.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: This report uses synthetic data and contains no credentials, private records, or organization material.
+          required: true
