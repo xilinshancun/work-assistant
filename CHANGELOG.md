@@ -22,6 +22,10 @@ or production support.
 
 ### Packaging and community
 
+- Bilingual README fact tables and a claim-to-code/test evidence map, with an
+  optional `llms.txt` documentation index and explicit verification boundaries.
+- A credential-free evaluator for deterministic demos, provider-free diagnosis,
+  local reporting and publication preview, with a machine-readable receipt.
 - Chinese/English entry guides, an actual synthetic demo screenshot, layered
   capability/recovery documentation and an evidence-based positioning roadmap.
 - Provider readiness and workflow-specific doctor guidance; unresolved asks

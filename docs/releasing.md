@@ -54,6 +54,12 @@ deterministic offline demo. It checks all seven report files including
 and outside-source workspaces are temporary; logs, SHA-256 receipts and copies
 of the synthetic report files remain under the selected output directory.
 
+The sdist is also unpacked into a fresh temporary directory and its own
+`scripts/evaluate.py` is run there. Its receipt must pass and match stdout;
+`sdist-evaluation/receipt.json` and its synthetic artifacts remain in the smoke
+output. This checks source-distribution completeness separately from installed
+wheel/sdist behavior.
+
 Build preparation can download tools from the package index. For installation
 checks without tool downloads, prepare compatible wheels using the same Python
 interpreter and platform as the intended smoke run:
@@ -77,7 +83,8 @@ no release credentials and no live provider integration. It tests Python 3.9 and
 downloads and installs that pair on the same four OS/Python combinations.
 Actions are pinned to reviewed commit SHAs. Update pins deliberately after
 checking upstream release notes. Synthetic package-smoke logs/receipts are CI
-artifacts with short retention, not official releases.
+artifacts with short retention, not official releases. Each test-matrix job also
+runs the credential-free evaluator and uploads its `receipt.json` for seven days.
 
 Before approving a candidate:
 

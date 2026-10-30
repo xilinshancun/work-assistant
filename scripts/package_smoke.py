@@ -26,9 +26,9 @@ REPORT_FILES = {'index.html', 'daily-sync.md', 'evidence.html', 'evidence.json',
 SOURCE_FILES = {'README.md', 'LICENSE', 'SECURITY.md', 'pyproject.toml', 'MANIFEST.in',
                 'README.en.md', 'docs/README.md', 'docs/quickstart.md', 'docs/quickstart.en.md',
                 'docs/capabilities.md', 'docs/positioning.md', 'docs/troubleshooting.md',
-                'docs/guide.md', 'docs/assets/demo-report.png',
+                'docs/guide.md', 'docs/assets/demo-report.png', 'docs/evidence-map.md', 'llms.txt',
                 'CONTRIBUTING.md', 'CHANGELOG.md', 'docs/releasing.md',
-                'scripts/package_smoke.py', 'examples/daily-bundle/state.json',
+                'scripts/package_smoke.py', 'scripts/evaluate.py', 'examples/daily-bundle/state.json',
                 'examples/daily-bundle/daily/2026-01-15.html',
                 'examples/daily-bundle/evidence/daily-2026-01-15.json'}
 
@@ -170,6 +170,23 @@ def smoke(artifacts, output, build_wheelhouse=None):
             shutil.copytree(report, output / (kind + '-report'))
             result.update(python=sys.version.split()[0], demo_hash=demo['hash'], installed_module=details['module'],
                           outside_cwd=str(cwd), install_mode='clean venv; --no-index; --no-deps')
+            if kind == 'sdist':
+                # audit() already rejected unsafe paths, links and special files.
+                # Evaluate the unpacked source too: a checkout-only test cannot
+                # establish that the source distribution contains the full tool.
+                source = scratch / 'unpacked-source'
+                source.mkdir()
+                for name, raw in archive_files(artifact).items():
+                    target = source / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(raw)
+                evaluation = json.loads(run([python, '-I', source / 'scripts/evaluate.py',
+                    '--output', output / 'sdist-evaluation'], cwd, 'sdist-evaluation'))
+                check(evaluation.get('schema') == 'wa.evaluation.v1' and evaluation.get('status') == 'passed',
+                      'unpacked sdist evaluation failed')
+                saved = json.loads((output / 'sdist-evaluation/receipt.json').read_text(encoding='utf-8'))
+                check(saved == evaluation, 'saved source evaluation differs from stdout')
+                result['source_evaluation'] = {'status': evaluation['status'], 'summary': evaluation['summary']}
     receipt = {'status': 'passed', 'scope': 'synthetic offline runtime; no model/Feishu calls; build tools may download',
                'artifacts': results}
     (output / 'receipt.json').write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

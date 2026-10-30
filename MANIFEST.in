@@ -1,4 +1,5 @@
 include README.md README.en.md LICENSE SECURITY.md PLAN.md AGENTS.md CONTRIBUTING.md CHANGELOG.md
+include llms.txt
 include examples/config.example.json
 include examples/config.lark-cli.example.json
 include examples/config.timeline.example.json
@@ -9,6 +10,7 @@ include examples/daily-bundle/state.json
 include examples/daily-bundle/daily/2026-01-15.html
 include examples/daily-bundle/evidence/daily-2026-01-15.json
 include scripts/package_smoke.py
+include scripts/evaluate.py
 recursive-include .github *.yml *.md
 recursive-include tests test_*.py
 recursive-include docs *.md

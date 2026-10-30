@@ -107,4 +107,4 @@ source /absolute/path/to/work-assistant/.venv/bin/activate
 wa --config /absolute/path/to/work-assistant/config.local.json task list
 ```
 
-`--config` precedes the subcommand. Relative config paths and `project --workspace` are resolved against the config directory. Demo state stays in its output directory; normal state defaults to `.wa/` beside the config. See [troubleshooting](troubleshooting.md) for backups and diagnostics.
+`--config` precedes the subcommand; a relative `--config` argument is resolved against the current working directory. Relative paths inside the configuration and `project --workspace` are resolved against the config directory. Demo state stays in its output directory; normal state defaults to `.wa/` beside the config. See [troubleshooting](troubleshooting.md) for backups and diagnostics.

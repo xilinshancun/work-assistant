@@ -15,6 +15,7 @@ process locks use POSIX `flock`; WSL2 has not been validated.
 python3 -m unittest discover -s tests -v
 python3 -m compileall -q work_assistant
 python3 -m work_assistant demo --output out/contributing-demo
+python3 scripts/evaluate.py --output out/contributing-evaluation
 ```
 
 These checks are offline and use synthetic fixtures, including loopback HTTP

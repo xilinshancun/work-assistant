@@ -1,0 +1,36 @@
+# Work Assistant
+
+> Local-first developer work assistant for Codex and Claude Code users: durable tasks, attributed evidence, corrections, immutable HTML/Markdown reports, and optional explicitly authorized Feishu delivery. MIT; Alpha source version 0.1.0; Python 3.9+ on macOS/Linux.
+
+The Python runtime has no third-party packages. Real tasks require installed and authenticated model CLIs; Codex is the smallest complete routing/execution setup. Claude Code alone does not cover the current routing path. DSH, Feishu and Paseo are optional for the core offline workflow.
+
+Install from a source checkout with `pip install .`, or run `python3 -m work_assistant` there without installation. Distribution name: `local-work-assistant`; import name: `work_assistant`; console command: `wa`. This project has not been published to PyPI as of 2026-10-30. Do not substitute `pip install local-work-assistant`; a same-name registry package does not establish project identity. Native Windows is unsupported; WSL2 is unverified.
+
+The demo and evaluator use synthetic data and do not validate live models or Feishu. Local storage does not mean offline inference. Completion, goal verification, and delivery readback have separate meanings. Non-replay requires a shared local journal and is not a cross-system exactly-once guarantee. Inbound is owner-only, disabled by default, and requires additional setup.
+
+This is a curated repository documentation index using the llms.txt proposal. It does not guarantee automatic discovery, ranking, or recommendation by any AI system. The linked source and commit-specific checks support independent assessment.
+
+## Start here
+
+- [English README](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/README.en.md): Scope, project facts, usage, implementation links, and boundaries.
+- [中文 README](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/README.md): 同一项目事实与中文入门入口。
+- [English quickstart](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/quickstart.en.md): Source installation, offline demo, first read-only task, reports, and configuration paths.
+- [Evidence map](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/evidence-map.md): Claims mapped to code, regression tests, reproducible commands, and verification limits.
+- [Capabilities](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/capabilities.md): Supported platforms, optional dependencies, validation scope, and exclusions.
+
+## Project and maintenance
+
+- [Package metadata](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/pyproject.toml): Canonical version, runtime dependencies, platform declarations, license, and CLI entry point.
+- [Security](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/SECURITY.md): Trust boundaries, data handling, non-replay semantics, and private vulnerability reporting.
+- [Contributing](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/CONTRIBUTING.md): Synthetic fixtures, development checks, and contribution expectations.
+- [Changelog](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/CHANGELOG.md): Source changes; a heading does not imply a registry release.
+- [Positioning and roadmap](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/positioning.md): Intended users, source-linked alternatives, and planned work distinguished from implemented behavior.
+
+## Optional
+
+- [Detailed reference](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/guide.md): Tasks, evidence, corrections, daily bundle import, publishing, and recovery; Chinese.
+- [Message commands](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/messages.md): Explicit bot/user sends, request IDs, readback, native replies, reactions, and uncertain outcomes.
+- [Timeline trees](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/timeline-trees.md): Dated Feishu document sections, preserved nodes, document-only publishing, and reconciliation.
+- [Optional inbound](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/inbound.md): Owner-only chat entry, DSH/Paseo routing, results protocol, and operational limits.
+- [Distribution verification](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/releasing.md): Build wheel/sdist and install each outside the checkout; no registry publishing automation.
+- [Troubleshooting](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/troubleshooting.md): Readiness states, configuration paths, recovery, and backups.

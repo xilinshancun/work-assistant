@@ -25,6 +25,14 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: python -m compileall -q work_assistant
       - run: python -m work_assistant demo --output out/demo
+      - run: python scripts/evaluate.py --output out/evaluation
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evaluation-${{ matrix.os }}-${{ matrix.python }}
+          path: out/evaluation/receipt.json
+          if-no-files-found: warn
+          retention-days: 7
   package:
     name: Build candidate artifacts
     runs-on: ubuntu-latest
