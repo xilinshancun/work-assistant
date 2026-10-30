@@ -239,7 +239,7 @@ def smoke(artifacts, output, build_wheelhouse=None):
             help_text = run([wa, '--help'], cwd, kind + '-help')
             check('usage:' in help_text and 'demo' in help_text, 'installed wa help is incomplete')
             run([python, '-I', '-m', 'work_assistant', '--help'], cwd, kind + '-module-help')
-            evaluation_dir = output / (kind + '-evaluation')
+            evaluation_dir = output / (kind + '-installed-evaluation')
             evaluation = json.loads(run([wa, 'evaluate', '--output', evaluation_dir], cwd, kind + '-installed-evaluation'))
             check(evaluation.get('schema') == 'wa.evaluation.v1' and evaluation.get('status') == 'passed',
                   'installed evaluation failed')

@@ -36,6 +36,9 @@ Security = "https://github.com/xilinshancun/work-assistant/security/policy"
 [project.scripts]
 wa = "work_assistant.cli:main"
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
 include = ["work_assistant*"]
 namespaces = false
