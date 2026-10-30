@@ -34,6 +34,8 @@ def parser():
     a.add_argument("goal")
     a.add_argument("--intent", choices=["read", "write_workspace"], default="read")
     a.add_argument("--provider", choices=["codex", "claude_code"])
+    a.add_argument("--routing", choices=["auto", "direct"], default="auto",
+                   help="auto: classification (default); direct: requires --provider and skips classifier/planner calls")
     a.add_argument("--review", action="store_true")
     a.add_argument("--report-date")
     project = commands.add_parser("project").add_subparsers(dest="operation", required=True)
@@ -58,6 +60,8 @@ def parser():
         a.add_argument("id")
         if command == "route":
             a.add_argument("--no-cache", action="store_true")
+            a.add_argument("--routing", choices=["auto", "direct"], default="auto",
+                           help="auto: classification (default); direct: use the task's saved provider with no classifier call")
         if command == "run":
             a.add_argument("--followup", help="Explicit new action in saved provider session")
     evidence = commands.add_parser("evidence").add_subparsers(dest="operation", required=True)
@@ -118,7 +122,7 @@ def dispatch(args, conf, store):
     c = args.command
     if c == "ask":
         return ask_task(store, Providers(conf), args.project, args.goal, args.intent, args.provider,
-                        review=args.review, report_date=args.report_date)
+                        review=args.review, report_date=args.report_date, routing=args.routing)
     if c == "project":
         if args.operation == "list":
             return store.projects()
@@ -132,7 +136,7 @@ def dispatch(args, conf, store):
             return store.tasks(args.project)
         return {"task": store.task(args.id), "history": store.records(task_id=args.id)}
     if c == "route":
-        return route_task(store, Providers(conf), args.id, use_cache=not args.no_cache)
+        return route_task(store, Providers(conf), args.id, use_cache=not args.no_cache, routing=args.routing)
     if c in {"run", "review"}:
         return run_task(store, Providers(conf), args.id, followup=getattr(args, "followup", None), review=c == "review")
     if c == "evidence":
@@ -189,7 +193,10 @@ def main(argv=None):
 
 
 def _main(argv=None):
-    args = parser().parse_args(argv)
+    command_parser = parser()
+    args = command_parser.parse_args(argv)
+    if args.command == "ask" and args.routing == "direct" and args.provider is None:
+        command_parser.error("ask --routing direct requires --provider")
     try:
         if args.command == "demo":
             result = demo(args.output)

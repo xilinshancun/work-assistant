@@ -67,13 +67,15 @@ class ReadinessTests(unittest.TestCase):
             result=config.doctor(self.conf,self.process)
         self.assertFalse(result['dsh']['installed']);self.assertFalse(result['claude_code']['installed'])
         self.assertEqual(result['workflows']['ask']['readiness'],'local_checks_passed')
-        self.assertEqual([p['provider'] for p in result['workflows']['ask']['paths']],['codex'])
+        self.assertEqual([p['provider'] for p in result['workflows']['ask']['paths'] if p['mode']=='auto'],['codex'])
+        direct=next(p for p in result['workflows']['ask']['paths'] if p['mode']=='direct')
+        self.assertEqual(direct['task_option'],['--routing','direct','--provider','codex'])
         self.assertEqual(result['workflows']['independent_review']['readiness'],'needs_providers')
         self.assertEqual(result['workflows']['feishu_live']['readiness'],'not_configured')
         self.assertEqual(result['workflows']['offline']['readiness'],'available')
 
-    def test_claude_alone_cannot_route_and_dsh_claude_is_only_a_limited_direct_path(self):
-        for installed, expected in (({'fixture-claude_code'},'needs_providers'),
+    def test_auto_and_explicit_direct_paths_remain_distinct(self):
+        for installed, expected in (({'fixture-claude_code'},'direct_only'),
                                     ({'fixture-claude_code','fixture-dsh'},'limited_direct_route'),
                                     ({'fixture-claude_code','fixture-codex'},'local_checks_passed')):
             with self.subTest(installed=installed),patch('work_assistant.config.shutil.which',
@@ -82,10 +84,18 @@ class ReadinessTests(unittest.TestCase):
             workflow=result['workflows']['ask']
             self.assertEqual(workflow['readiness'],expected)
             self.assertEqual(workflow['gpt_fallback'],'local_checks_passed' if 'fixture-codex' in installed else 'unavailable')
-            if expected=='needs_providers':self.assertEqual(workflow['paths'],[])
-            elif expected=='limited_direct_route':self.assertEqual(workflow['paths'][0]['coverage'],'direct_classification_only')
+            if expected=='direct_only':
+                self.assertEqual(workflow['auto_readiness'],'needs_providers')
+                self.assertEqual(len(workflow['paths']),1)
+                self.assertEqual(workflow['paths'][0]['mode'],'direct')
+                self.assertEqual(workflow['paths'][0]['coverage'],'executor_only_no_classification')
+                self.assertEqual(workflow['paths'][0]['task_option'],['--routing','direct','--provider','claude_code'])
+            elif expected=='limited_direct_route':
+                self.assertEqual(workflow['auto_readiness'],'limited_direct_route')
+                self.assertEqual(workflow['paths'][0]['mode'],'auto')
+                self.assertEqual(workflow['paths'][0]['coverage'],'direct_classification_only')
             else:
-                claude=next(path for path in workflow['paths'] if path['provider']=='claude_code')
+                claude=next(path for path in workflow['paths'] if path['provider']=='claude_code' and path['mode']=='auto')
                 self.assertEqual(claude['coverage'],'planner_and_executor')
 
     def test_missing_help_flag_is_incompatible_even_when_mcp_checks_pass(self):

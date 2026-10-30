@@ -3,21 +3,54 @@ from .policy import validate_route, needs_escalation, authorize
 from .util import strict_json, dumps, digest, redact
 
 
-def route_task(store, providers, task_id, use_cache=True):
+def validate_routing(routing, provider=None):
+    if type(routing) is not str or routing not in ("auto", "direct"):
+        raise ValueError("routing must be auto or direct")
+    if routing == "direct" and (type(provider) is not str or provider not in ("codex", "claude_code")):
+        raise ValueError("direct routing requires an explicitly selected codex or claude_code provider")
+
+
+def _inputs(store, task_id, routing):
     task = store.task(task_id)
     project = store.project(task["project_id"])
     if task["status"] in {"running", "collecting", "outcome_unknown", "cancelled", "routing"}:
         raise ValueError("task cannot be routed in state " + task["status"])
     if not Path(project["workspace"]).is_dir():
         raise ValueError("configured project workspace no longer exists")
-    request = {"task_id": task_id, "goal": task["goal"], "intent": task["intent"], "provider": task["provider"]}
-    cache_key = digest({"request": request, "project": project, "providers": providers.config["providers"]})
+    if task["intent"] not in ("read", "write_workspace"):
+        raise ValueError("unsupported task intent")
+    validate_routing(routing, task["provider"])
+    return task, project
+
+
+def route_task(store, providers, task_id, use_cache=True, routing="auto"):
+    _inputs(store, task_id, routing)
     with store.claim(["task:" + task_id]) as (_, fds):
+        # Both modes must use the current task/project after obtaining the claim.
+        task, project = _inputs(store, task_id, routing)
+        request = {"task_id": task_id, "goal": task["goal"], "intent": task["intent"], "provider": task["provider"]}
+        cache_key = digest({"mode": "direct", "request": request, "project": project}) if routing == "direct" else digest(
+            {"request": request, "project": project, "providers": providers.config["providers"]})
+        if routing == "direct":
+            candidate = validate_route({"schema": "wa.route.v1", "task_id": task_id, "executor": task["provider"],
+                "requested_action": task["intent"], "complexity": "unknown", "confidence": 0.0,
+                "needs_escalation": False, "reason": "Executor explicitly selected by the user; no classifier or model score."}, task_id)
+            accepted = authorize(project["grants"], task["intent"])
+            error = "" if accepted else "project grants deny requested action"
+            with store.transaction():
+                store.transition(task_id, "routing")
+                record = store.record("route", {"stage": "direct", "provider": "user_direct", "mode": "direct",
+                    "basis": "explicit_user_selection", "scoring": "none (no classifier)", "route": candidate,
+                    "accepted": accepted, "cache_key": cache_key, "response": None, "fallback_reason": error,
+                    "fallback_count": 0}, task_id, project["id"])
+                store.record("event", {"action": "direct_route", "route": record["id"]}, task_id, project["id"])
+                store.transition(task_id, "routed" if accepted else "needs_user", error)
+            return record
         store.transition(task_id, "routing")
         if use_cache:
             prior = next((r for r in store.records("route", task_id=task_id)
-                          if r["data"].get("cache_key") == cache_key and r["data"].get("accepted")), None)
-            if prior:
+                          if r["data"].get("accepted")), None)
+            if prior and prior["data"].get("mode", "auto") == "auto" and prior["data"].get("cache_key") == cache_key:
                 store.record("event", {"action": "route_cache_hit", "route": prior["id"]}, task_id, project["id"])
                 store.transition(task_id, "routed", "")
                 return prior
@@ -55,7 +88,7 @@ def route_task(store, providers, task_id, use_cache=True):
                     else:
                         error = ""
                 accepted = candidate is not None and not error
-                record = store.record("route", {"stage": stage, "provider": provider, "route": candidate,
+                record = store.record("route", {"stage": stage, "provider": provider, "mode": "auto", "route": candidate,
                     "accepted": accepted, "cache_key": cache_key, "response": response,
                     "fallback_reason": error, "fallback_count": len(diagnostics)}, task_id, project["id"])
                 if accepted:

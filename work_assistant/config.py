@@ -155,22 +155,29 @@ def doctor(conf, process=None):
     local = {name: result.get(name, {}).get("readiness") == "local_checks_passed" for name in DEFAULT["providers"]}
     paths = []
     if local["codex"]:
-        paths.append({"provider": "codex", "routing": "DSH optional; Codex handles fallback", "coverage": "planner_and_executor",
+        paths.append({"provider": "codex", "mode": "auto", "routing": "DSH optional; Codex handles fallback", "coverage": "planner_and_executor",
                       "task_option": ["--provider", "codex"]})
     if local["claude_code"] and (local["dsh"] or local["codex"]):
-        paths.append({"provider": "claude_code", "routing": "Codex planner fallback available; DSH optional" if local["codex"] else
+        paths.append({"provider": "claude_code", "mode": "auto", "routing": "Codex planner fallback available; DSH optional" if local["codex"] else
                       "DSH direct route; GPT escalation additionally needs Codex",
                       "coverage": "planner_and_executor" if local["codex"] else "direct_classification_only",
                       "task_option": ["--provider", "claude_code"]})
+    auto_readiness = "local_checks_passed" if local["codex"] else "limited_direct_route" if paths else "needs_providers"
+    for name in ("claude_code", "codex"):
+        if local[name]:
+            paths.append({"provider": name, "mode": "direct", "routing": "Explicit user selection; no classifier or planner",
+                          "coverage": "executor_only_no_classification", "task_option": ["--routing", "direct", "--provider", name]})
     result["workflows"] = {
         "offline": {"readiness": "available", "authentication": "not required",
             "features": ["demo", "project/task records", "evidence/claims", "report", "publish --dry-run"],
             "next_steps": [{"argv": [sys.executable, "-m", "work_assistant", "demo", "--output", "out/demo"]}]},
-        "ask": {"readiness": "local_checks_passed" if local["codex"] else "limited_direct_route" if paths else "needs_providers",
+        "ask": {"readiness": "direct_only" if auto_readiness == "needs_providers" and paths else auto_readiness,
+            "auto_readiness": auto_readiness,
             "authentication": "not tested", "gpt_fallback": "local_checks_passed" if local["codex"] else "unavailable",
             "paths": paths, "next_steps": ["Authenticate the listed provider CLIs separately; local compatibility does not test model access." if local["codex"] else
-                "DSH+Claude only supports direct classification here; install/configure and authenticate Codex for complex/failed classification fallback." if paths else
-                "Install/configure and authenticate Codex for the minimal ask path; DSH is optional. See the provider diagnostics above."]},
+                "Auto uses DSH direct classification and needs Codex for fallback. Explicit --routing direct --provider claude_code skips classification." if auto_readiness == "limited_direct_route" else
+                "Use explicit --routing direct --provider claude_code after authenticating Claude Code; auto routing still needs DSH or a Codex planner." if paths else
+                "Configure/authenticate one executor for explicit direct routing, or Codex for auto GPT fallback; DSH is optional."]},
         "independent_review": {"optional": True, "readiness": "local_checks_passed" if local["codex"] and local["claude_code"] else "needs_providers",
             "authentication": "not tested", "next_steps": ["Independent opposite-provider review requires both Codex and Claude Code; omit --review to use a single executor."]},
         "feishu_live": {"optional": True, "readiness": "configured_auth_untested" if result["feishu"].get("configured") else "not_configured",

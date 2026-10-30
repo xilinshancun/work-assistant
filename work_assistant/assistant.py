@@ -3,19 +3,20 @@ import sqlite3
 import sys
 from datetime import date
 from .policy import authorize
-from .routing import route_task
+from .routing import route_task, validate_routing
 from .runner import run_task
 from .reports import generate_report
 from .util import redact
 
 
-def ask_task(store, providers, project, goal, intent="read", provider=None, review=False, report_date=None):
+def ask_task(store, providers, project, goal, intent="read", provider=None, review=False, report_date=None, routing="auto"):
+    validate_routing(routing, provider)  # Before creating a task or selecting a project.
     if report_date is not None:
         date.fromisoformat(report_date)
     p = store.project(project)
     task = store.add_task(p["id"], goal, intent, provider)
     ident = task["id"]
-    result = {"task_id": ident, "stage": "task", "steps": []}
+    result = {"task_id": ident, "stage": "task", "routing": routing, "steps": []}
 
     def finish(status=None, diagnostic=None):
         current = store.task(ident)
@@ -27,9 +28,12 @@ def ask_task(store, providers, project, goal, intent="read", provider=None, revi
             command = [sys.executable, "-m", "work_assistant", "--config",
                        providers.config.get("config_path", "config.local.json")]
             result["next_steps"] = [{"action": "inspect_task", "argv": command + ["task", "show", ident]}]
-            if result["stage"] == "route":
+            if result["stage"] in {"route", "run", "review"}:
+                note = ("Independent review needs the opposite executor; inspect its local CLI readiness." if result["stage"] == "review" else
+                        "Direct routing uses only the explicitly selected executor; inspect its CLI setup/authentication. No classifier or planner was used." if routing == "direct" else
+                        "Inspect local CLI compatibility and authenticate providers separately; DSH is optional, Codex is required for GPT fallback. Continue the existing task after correcting setup.")
                 result["next_steps"].append({"action": "check_provider_readiness", "argv": command + ["doctor", "--json"],
-                    "note": "Inspect local CLI compatibility and authenticate providers separately; DSH is optional, Codex is required for GPT fallback. Continue the existing task after correcting setup."})
+                    "note": note})
             if result["status"] == "outcome_unknown":
                 run_id = next((step["id"] for step in reversed(result["steps"]) if step["kind"] in {"run", "review"}), None)
                 if run_id:
@@ -42,7 +46,7 @@ def ask_task(store, providers, project, goal, intent="read", provider=None, revi
             store.transition(ident, "needs_user", "project grants deny requested task intent; no authority created")
             return finish()
         result["stage"] = "route"
-        route = route_task(store, providers, ident)
+        route = route_task(store, providers, ident, routing=routing)
         result["steps"].append({"kind": "route", "id": route["id"]})
         if not route["data"]["accepted"]:
             return finish()
