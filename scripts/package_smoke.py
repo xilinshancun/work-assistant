@@ -16,7 +16,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import venv
 import zipfile
 
 REPO = Path(__file__).resolve().parents[1]
@@ -110,8 +109,12 @@ def smoke(artifacts, output, build_wheelhouse=None):
         nonlocal sequence
         sequence += 1
         log = output / 'logs' / ('%02d-%s.log' % (sequence, label))
-        process = subprocess.run([str(a) for a in argv], cwd=cwd, env=environment,
-                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+        try:
+            process = subprocess.run([str(a) for a in argv], cwd=cwd, env=environment,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+        except subprocess.TimeoutExpired as exc:
+            log.write_bytes(exc.output or b'')
+            raise ValueError('%s timed out; see %s' % (label, log)) from None
         log.write_bytes(process.stdout)
         check(process.returncode == 0, '%s failed (exit %s); see %s' % (label, process.returncode, log))
         return process.stdout.decode('utf-8')
@@ -134,9 +137,14 @@ def smoke(artifacts, output, build_wheelhouse=None):
                  '--only-binary=:all:', '--dest', wheelhouse, 'setuptools>=77.0.3', 'wheel'], scratch, 'build-tool-download')
         for result, artifact, kind in zip(results, wheels + sdists, ('wheel', 'sdist')):
             env_dir = scratch / (kind + '-venv')
-            venv.EnvBuilder(with_pip=True).create(env_dir)
+            # The POSIX CLI defaults to symlinks. EnvBuilder's copy default can
+            # break stdlib discovery for a directly launched uv-managed Python.
+            run([sys.executable, '-I', '-m', 'venv', '--without-pip', env_dir], scratch, kind + '-venv')
             scripts = env_dir / ('Scripts' if os.name == 'nt' else 'bin')
             python, wa = scripts / ('python.exe' if os.name == 'nt' else 'python'), scripts / ('wa.exe' if os.name == 'nt' else 'wa')
+            # A separate step keeps ensurepip's full output in its own log rather
+            # than losing it inside venv's nested CalledProcessError diagnostic.
+            run([python, '-I', '-m', 'ensurepip', '--upgrade', '--default-pip'], scratch, kind + '-ensurepip')
             cwd = scratch / (kind + '-outside')
             cwd.mkdir()
             run([python, '-I', '-m', 'pip', '--isolated', 'install', '--no-index', '--find-links', wheelhouse,
