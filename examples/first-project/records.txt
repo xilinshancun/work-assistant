@@ -1,0 +1,5 @@
+synthetic-alpha
+
+synthetic-beta
+
+synthetic-gamma
