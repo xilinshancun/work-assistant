@@ -91,7 +91,29 @@ Your local workflow is now complete. Read [Feishu setup](guide.md#飞书预览�
 
 ## Install the wa command
 
-From the repository root, install into a virtual environment:
+The first PyPI version, `0.1.0a1`, is being prepared. The registry commands below become usable only after that upload is verified; source installation remains available now.
+
+For normal use, [install pipx](https://pipx.pypa.io/stable/how-to/install-pipx.html) and put the CLI in its own environment. Pin the Alpha version explicitly instead of relying on prerelease selection defaults:
+
+```sh
+pipx install local-work-assistant==0.1.0a1
+wa --version
+wa demo --output demo-report
+wa evaluate --output evaluation
+wa example --output practice-project
+```
+
+Installation needs network access. The three local experience commands make no model calls. `evaluate` and `example` require new directories. `example` only copies three practice files; invoking a model still requires an explicit `ask`. Use `wa` after a pipx installation; the package need not be importable by your system Python.
+
+pipx has its own Python version requirements. For Python 3.9/3.10, or as an alternative, use a virtual environment:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install local-work-assistant==0.1.0a1
+.venv/bin/wa --version
+```
+
+Contributors can install from the cloned repository root:
 
 ```sh
 python3 -m venv .venv
@@ -100,13 +122,14 @@ python3 -m venv .venv
 .venv/bin/wa demo --output out/installed-demo
 ```
 
-Building requires setuptools; pip may access the package index for build tools. The installed runtime has no third-party dependencies. This installs from source and does not rely on a similarly named PyPI package.
+Source builds require setuptools; pip may access the index for build tools. The Python runtime has no third-party packages. Installed `wa` accepts the same arguments as `python3 -m work_assistant` from the source checkout.
 
-After activating the environment, `wa` is equivalent to `python3 -m work_assistant`. When changing directories, specify the same config explicitly to keep using the same state:
+Keep configuration and journals outside the pipx environment. Run `wa init` in your own assistant directory; when changing directories, specify the same config explicitly:
 
 ```sh
-source /absolute/path/to/work-assistant/.venv/bin/activate
-wa --config /absolute/path/to/work-assistant/config.local.json task list
+wa --config /absolute/path/to/assistant/config.local.json task list
 ```
 
-`--config` precedes the subcommand; a relative `--config` argument is resolved against the current working directory. Relative paths inside the configuration and `project --workspace` are resolved against the config directory. Demo state stays in its output directory; normal state defaults to `.wa/` beside the config. See [troubleshooting](troubleshooting.md) for backups and diagnostics.
+`--config` precedes the subcommand; a relative `--config` argument is resolved against the current working directory. Relative paths inside the configuration and `project --workspace` are resolved against the config directory. Demo state stays in its output directory; normal state defaults to `.wa/` beside the config.
+
+Before upgrading, stop any listener you enabled, back up the configuration and `.wa/`, and read the target version's CHANGELOG. Alpha state compatibility is not guaranteed; downgrading the executable does not restore a database. To select a specific later version, use `pipx install --force local-work-assistant==TARGET_VERSION`. `pipx uninstall local-work-assistant` removes the app environment, not your external journal. See [troubleshooting](troubleshooting.md) for backups.

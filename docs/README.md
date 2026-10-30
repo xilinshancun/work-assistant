@@ -11,7 +11,7 @@
 3. [排障](troubleshooting.md)：doctor、路径、unknown、回读失败、数据位置。
 4. [证据地图 / Evidence map](evidence-map.md)：核心主张对应的实现、回归测试、无账号评估和验证限制。
 
-在仓库根目录运行 `python3 scripts/evaluate.py --output out/evaluation`，可用合成材料检查离线报告、无 provider 时的诊断和发布预览。输出目录必须是新目录；结果不代表真实模型或远端服务验收。
+安装后运行 `wa evaluate --output evaluation`，可用合成材料检查离线报告、无 provider 时的诊断和发布预览。`wa example --output practice-project` 生成第一个任务的练习文件。源码目录也可使用 `python3 -m work_assistant evaluate` 或原有脚本入口。输出目录必须是新目录；结果不代表真实模型或远端服务验收。
 
 ## 操作参考
 

@@ -8,20 +8,25 @@ Passing a local check is not evidence of live model quality or remote delivery.
 
 ## Start with a credential-free evaluation
 
-From a source checkout or unpacked source distribution on macOS/Linux, with
-Python 3.9+:
+On macOS/Linux with Python 3.9+, evaluate the installed package:
 
 ```sh
-python3 scripts/evaluate.py --output out/evaluation
+wa evaluate --output evaluation
 ```
+
+From a source checkout or unpacked source distribution, use
+`python3 -m work_assistant evaluate --output evaluation`; the compatible
+`python3 scripts/evaluate.py` wrapper remains available. Evaluation uses the
+runtime package associated with that entry point, not a checkout inferred from
+the working directory.
 
 The output directory must be new. The evaluator uses synthetic configuration and
 data to exercise the real CLI, without model, Feishu, or Paseo calls. Keep its
-JSON receipt alongside the exact source commit you evaluated. Do not replace
+JSON receipt alongside the installed version/artifact hash or source commit you evaluated. Do not replace
 your own configuration or journal to make an evaluation pass.
 
 The script prints JSON and, with `--output`, saves the same object as
-`out/evaluation/receipt.json`. Its schema is `wa.evaluation.v1`:
+`evaluation/receipt.json`. Its schema is `wa.evaluation.v1`:
 `status` is `passed` or `failed`; `checks[]` holds each outcome;
 `summary` counts passed/failed/skipped checks; `scope` and `limitations` describe
 what was tested. Exit code **0** means all checks passed, **1** means failure.
@@ -73,7 +78,7 @@ python3 -m unittest discover -s tests -p 'test_evidence_reports.py' -v
 
 | Question | Reproduction |
 | --- | --- |
-| Can I get a useful artifact without an account? | `python3 scripts/evaluate.py --output out/evaluation` |
+| Can I get a useful artifact without an account? | `wa evaluate --output evaluation` (installed), or `python3 scripts/evaluate.py --output evaluation` (source) |
 | Do evidence and corrections retain their meaning? | `python3 -m unittest discover -s tests -p 'test_evidence_reports.py' -v` |
 | Does an unknown send avoid automatic replay? | `python3 -m unittest discover -s tests -p 'test_messages.py' -v` |
 | Are task authorization checks covered? | `python3 -m unittest discover -s tests -p 'test_policy.py' -v` |

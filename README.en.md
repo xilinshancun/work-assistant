@@ -11,7 +11,7 @@ A local-first developer work assistant for Codex / Claude Code users. A one-shot
 
 | Project fact | Current scope |
 | --- | --- |
-| Status and version | **Alpha, source version 0.1.0**; see [CHANGELOG](CHANGELOG.md). No stable API or state-migration promise |
+| Status and version | **Alpha 0.1.0a1**; see [CHANGELOG](CHANGELOG.md). No stable API or state-migration promise |
 | Platforms | Python **3.9+**, macOS / Linux; native Windows unsupported, WSL2 unverified |
 | Python dependencies | No third-party Python runtime packages; real tasks still require external model CLIs |
 | Installation and names | Install from source with `pip install .`; distribution `local-work-assistant`, module `work_assistant`, command `wa` |
@@ -19,7 +19,7 @@ A local-first developer work assistant for Codex / Claude Code users. A one-shot
 
 [pyproject.toml](pyproject.toml) defines package metadata. See the [capability matrix](docs/capabilities.md) for validation scope.
 
-**This project has not been published to PyPI as of 2026-10-30.** Install from source; do not substitute `pip install local-work-assistant`. A same-name registry package is not evidence of this project's identity.
+**The first PyPI release, 0.1.0a1, is being prepared; a successful upload has not yet been verified.** Use the source path below for now. See [installation](docs/quickstart.en.md#install-the-wa-command) for release installation and upgrades.
 
 ## When to use it
 
@@ -88,13 +88,14 @@ Your project → Task → Existing coding CLI → Execution / Evidence / Correct
 
 ## Evaluate it independently
 
-From the repository root, without model, Feishu, or Paseo accounts:
+After installation, without retaining a source checkout or supplying model, Feishu, or Paseo accounts:
 
 ```sh
-python3 scripts/evaluate.py --output out/evaluation
+wa evaluate --output evaluation
+wa example --output practice-project
 ```
 
-The evaluator uses temporary synthetic configuration to check the CLI, two independent demos for matching output, report artifacts, and credential-free publishing previews. It produces a JSON receipt without sending your configuration or project to a model. It verifies local behavior, **not real model quality, Feishu permissions, or client rendering**. See the [evidence map](docs/evidence-map.md) for its exact scope, focused test commands, and failure semantics.
+`evaluate` uses temporary synthetic configuration to check the CLI, two independent demos for matching output, report artifacts, and credential-free publishing previews. It produces a JSON receipt. `example` creates three synthetic practice files for an optional real executor task. Both require new output directories and make no model calls. Source users can run `python3 -m work_assistant evaluate`; the old `python3 scripts/evaluate.py` entry remains available. Evaluation checks local behavior, **not real model quality, Feishu permissions, or client rendering**. See the [evidence map](docs/evidence-map.md) for exact scope and failure semantics.
 
 [llms.txt](llms.txt) provides a concise fact and documentation index for retrieval tools. It points to the same implementation and evidence available to human readers.
 

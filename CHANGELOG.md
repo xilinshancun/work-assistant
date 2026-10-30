@@ -1,9 +1,10 @@
 # Changelog
 
 This file records reviewable source changes. A version heading is not evidence of
-a PyPI upload, Git tag or GitHub release. No distribution is published by CI.
+a PyPI upload, Git tag or GitHub release. Only the explicitly dispatched release
+workflow can publish; normal test CI never uploads to a registry.
 
-## [0.1.0] - Unreleased
+## [0.1.0a1] - 2026-10-30
 
 Alpha baseline; interfaces, local state formats and provider compatibility may
 change. Back up private state before upgrading; do not assume automatic migration
@@ -27,6 +28,10 @@ or production support.
 
 ### Packaging and community
 
+- Installed `wa evaluate` and `wa example` commands: offline self-evaluation and
+  a bundled synthetic practice project, without retaining a source checkout.
+- A version-pinned Alpha installation path, a self-contained PyPI description,
+  and a manual Trusted Publishing workflow that uploads the validated artifacts.
 - Bilingual README fact tables and a claim-to-code/test evidence map, with an
   optional `llms.txt` documentation index and explicit verification boundaries.
 - A credential-free evaluator for deterministic demos, provider-free diagnosis,

@@ -11,7 +11,7 @@ Work Assistant 是面向 Codex / Claude Code 使用者的本地优先开发者�
 
 | 项目事实 | 当前范围 |
 | --- | --- |
-| 状态与版本 | **Alpha，源码版本 0.1.0**；见 [CHANGELOG](CHANGELOG.md)，不承诺稳定 API 或状态迁移 |
+| 状态与版本 | **Alpha 0.1.0a1**；见 [CHANGELOG](CHANGELOG.md)，不承诺稳定 API 或状态迁移 |
 | 平台 | Python **3.9+**，macOS / Linux；原生 Windows 不支持，WSL2 未验收 |
 | Python 依赖 | 运行时无第三方 Python 包；真实任务仍需要外部模型 CLI |
 | 安装与命名 | 从源码 `pip install .`；分发名 `local-work-assistant`、模块 `work_assistant`、命令 `wa` |
@@ -19,7 +19,7 @@ Work Assistant 是面向 Codex / Claude Code 使用者的本地优先开发者�
 
 版本与依赖以 [pyproject.toml](pyproject.toml) 为准，完整验证范围见[能力表](docs/capabilities.md)。
 
-截至 **2026-10-30，本项目尚未发布到 PyPI**。请从源码安装，不要用 `pip install local-work-assistant` 代替；同名包不代表本项目。
+**0.1.0a1 正在准备首次 PyPI 发布，尚未确认上传成功。** 当前可使用下方源码路径；发行版安装方式及升级方法见[安装指南](docs/quickstart.md#安装为-wa-命令)。
 
 ## 什么时候用它
 
@@ -88,13 +88,14 @@ python3 -m work_assistant report my-project --date YYYY-MM-DD
 
 ## 独立评估这个项目
 
-在仓库根目录运行，无需模型、飞书或 Paseo 账号：
+安装后无需保留源码，也可以独立评估；不需要模型、飞书或 Paseo 账号：
 
 ```sh
-python3 scripts/evaluate.py --output out/evaluation
+wa evaluate --output evaluation
+wa example --output practice-project
 ```
 
-评估入口使用临时合成配置检查 CLI、两个独立 demo 的一致性、报告产物与无凭证发布预览，输出 JSON 回执；不会把自己的配置或项目交给模型。它验证本地流程，**不验证真实模型质量、飞书权限或客户端显示**。精确检查范围、关键测试命令与失败语义见[证据地图](docs/evidence-map.md)。
+`evaluate` 使用临时合成配置检查 CLI、两个独立 demo 的一致性、报告产物与无凭证发布预览，输出 JSON 回执。`example` 生成三个合成练习文件，供你主动运行第一个真实任务。两者都要求新的输出目录，不调用模型。源码用户也可用 `python3 -m work_assistant evaluate`；旧的 `python3 scripts/evaluate.py` 入口保留。评估验证本地流程，**不验证真实模型质量、飞书权限或客户端显示**。精确范围见[证据地图](docs/evidence-map.md)。
 
 供 AI 检索的 [llms.txt](llms.txt) 提供精简事实与公开文档索引；与人类读者使用同一套源码和验证证据。
 

@@ -91,7 +91,29 @@ python3 -m work_assistant publish REPORT_ID --dry-run
 
 ## 安装为 wa 命令
 
-从仓库根目录安装，虚拟环境避免修改系统 Python：
+首个 PyPI 版本 `0.1.0a1` 正在准备发布。以下发行版命令仅在该版本上传并核实后可用；目前可用后面的源码安装方式。
+
+日常使用推荐 [pipx](https://pipx.pypa.io/stable/how-to/install-pipx.html)，将 CLI 放在独立环境中。显式固定 Alpha 版本，不依赖包管理器是否默认选择预发布版：
+
+```sh
+pipx install local-work-assistant==0.1.0a1
+wa --version
+wa demo --output demo-report
+wa evaluate --output evaluation
+wa example --output practice-project
+```
+
+`pipx` 需先单独安装；安装时需要网络，以上三个本地体验命令不调用模型。`evaluate` 和 `example` 要求新目录。`example` 只复制三个练习文件，实际调用模型要由你再执行 `ask`。pipx 安装后用 `wa`，不需要让系统 Python 能 import 此包。
+
+pipx 本身有独立的 Python 版本要求。只有 Python 3.9/3.10，或不想使用 pipx 时，可选择自己的虚拟环境：
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install local-work-assistant==0.1.0a1
+.venv/bin/wa --version
+```
+
+需要修改源码或参与贡献时，在克隆的仓库根目录安装：
 
 ```sh
 python3 -m venv .venv
@@ -100,13 +122,14 @@ python3 -m venv .venv
 .venv/bin/wa demo --output out/installed-demo
 ```
 
-构建时需要 setuptools；pip 可能为构建工具访问包索引。安装后运行时无第三方依赖。这是源码安装路径，不依赖同名 PyPI 包。
+源码构建需要 setuptools；pip 可能为构建工具访问包索引。安装后 Python 运行时无第三方包。安装后的 `wa` 与源码目录中的 `python3 -m work_assistant` 使用相同命令参数。
 
-激活环境后，`wa` 等价于 `python3 -m work_assistant`。从任意目录运行时，显式指定同一配置，以免创建互不关联的状态库：
+配置和 journal 保存在运行时选择的位置，不放进 pipx 环境。先在自己的工作助理目录运行 `wa init`；从其他目录操作时显式使用同一配置：
 
 ```sh
-source /absolute/path/to/work-assistant/.venv/bin/activate
-wa --config /absolute/path/to/work-assistant/config.local.json task list
+wa --config /absolute/path/to/assistant/config.local.json task list
 ```
 
-`--config` 放在子命令之前。配置中的相对路径和 `project --workspace` 相对配置文件目录解析。演示输出只在指定输出目录中；真实状态默认在配置旁的 `.wa/`。备份方法和问题诊断见[排障指南](troubleshooting.md)。
+`--config` 放在子命令之前；相对的 `--config` 按当前工作目录解析。配置内部相对路径和 `project --workspace` 相对配置文件目录解析。演示只写指定输出目录，真实状态默认在配置旁的 `.wa/`。
+
+升级前先停下自己启用的监听器，备份配置和 `.wa/`，阅读目标版本 CHANGELOG。Alpha 不保证状态向后兼容；降级可执行文件不等于恢复数据库。升级到明确版本时使用 `pipx install --force local-work-assistant==目标版本`；卸载命令是 `pipx uninstall local-work-assistant`，不会替你删除外部 journal。备份细节见[排障指南](troubleshooting.md)。

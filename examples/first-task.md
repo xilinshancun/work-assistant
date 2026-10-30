@@ -9,6 +9,27 @@ are downloaded, imported, or counted locally.
 以下 Work Assistant 命令均在仓库根目录运行。练习输入全为合成数据；需要使用者
 自己已安装、已登录的 Claude Code 或 Codex，不附带账号，也不会自动启动模型。
 
+## Installed package / 已安装的发行版
+
+You do not need a clone for the practice files. From your assistant directory:
+
+安装后不必克隆仓库，在自己的工作助理目录执行：
+
+```sh
+wa example --output practice-project
+wa init
+wa doctor --json
+wa project add first-project --workspace ./practice-project
+```
+
+Use `wa` in place of `python3 -m work_assistant` in the remaining steps. The
+output directory must be new. For manual verification, run
+`python3 practice-project/count_records.py practice-project/records.txt`.
+The source-checkout setup below is an alternative, not an additional step.
+
+后续命令将 `python3 -m work_assistant` 替换为 `wa` 即可。输出目录必须是新的。
+下方源码注册方式是另一种选择，无需重复注册。
+
 ## Set up a read-only project / 注册只读项目
 
 ```sh
