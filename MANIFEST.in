@@ -13,6 +13,7 @@ include examples/daily-bundle/daily/2026-01-15.html
 include examples/daily-bundle/evidence/daily-2026-01-15.json
 include scripts/package_smoke.py
 include scripts/evaluate.py
+include work_assistant/resources/first_project/README.md work_assistant/resources/first_project/count_records.py work_assistant/resources/first_project/records.txt
 recursive-include .github *.yml *.md
 recursive-include tests test_*.py
 recursive-include docs *.md

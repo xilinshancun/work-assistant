@@ -5,21 +5,28 @@ Only build tools may be downloaded. Artifact installation is --no-index; demo
 and CLI checks use synthetic data outside the checkout, with no provider calls.
 """
 import argparse
+import ast
 import configparser
+from datetime import date
 from email.parser import BytesParser
 import hashlib
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 import zipfile
+from urllib.parse import urlsplit
 
 REPO = Path(__file__).resolve().parents[1]
 DIST_NAME = 'local-work-assistant'
+EXAMPLE_FILES = {'README.md', 'count_records.py', 'records.txt'}
+PACKAGE_RESOURCES = {'work_assistant/resources/first_project/' + name for name in EXAMPLE_FILES}
 EXPECTED_DEMO = '9b64c0da68f8d0e975160f084331662c07f902458d04afcf480296667d65f043'
 REPORT_FILES = {'index.html', 'daily-sync.md', 'evidence.html', 'evidence.json',
                 'card.json', 'document.json', 'card-preview.html'}
@@ -29,7 +36,7 @@ SOURCE_FILES = {'README.md', 'LICENSE', 'SECURITY.md', 'pyproject.toml', 'MANIFE
                 'docs/guide.md', 'docs/assets/demo-report.png', 'docs/evidence-map.md', 'docs/routing.md', 'llms.txt',
                 'examples/first-task.md', 'examples/first-project/README.md',
                 'examples/first-project/count_records.py', 'examples/first-project/records.txt',
-                'CONTRIBUTING.md', 'CHANGELOG.md', 'docs/releasing.md',
+                'CONTRIBUTING.md', 'CHANGELOG.md', 'docs/releasing.md', 'docs/pypi.md',
                 'scripts/package_smoke.py', 'scripts/evaluate.py', 'examples/daily-bundle/state.json',
                 'examples/daily-bundle/daily/2026-01-15.html',
                 'examples/daily-bundle/evidence/daily-2026-01-15.json'}
@@ -47,6 +54,63 @@ def clean_environment():
 def check(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def validate_description(description):
+    """PyPI cannot resolve checkout-relative Markdown or HTML destinations."""
+    destinations = []
+
+    class Links(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            destinations.extend(value for key, value in attrs if key in {'href', 'src'} and value is not None)
+
+    Links().feed(description)
+    for pattern in (r'!?\[[^\]\n]*\]\(\s*(?:<([^>]+)>|([^\s)]+))',
+                    r'^\s{0,3}\[[^\]\n]+\]:\s*(?:<([^>]+)>|(\S+))'):
+        for match in re.finditer(pattern, description, re.MULTILINE):
+            destinations.append(next(value for value in match.groups() if value is not None))
+    for destination in destinations:
+        check(urlsplit(destination).scheme in {'https', 'http', 'mailto'},
+              'PyPI long description contains a relative/unsupported link: ' + destination)
+
+
+def validate_changelog(changelog, version, released=False):
+    match = re.search(r'^## \[' + re.escape(version) + r'\] - (Unreleased|\d{4}-\d{2}-\d{2})\s*$',
+                      changelog, re.MULTILINE)
+    check(match is not None, 'version/changelog heading mismatch')
+    check(not released or match.group(1) != 'Unreleased', 'release changelog heading requires a valid release date')
+    if match.group(1) != 'Unreleased':
+        date.fromisoformat(match.group(1))
+
+
+def validate_release(version, tag, ref, repo=REPO):
+    """Validate the checked-out tag, not a separately supplied source branch."""
+    check(re.fullmatch(r'\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?', version) is not None,
+          'release version must be an explicit X.Y.Z or prerelease version')
+    check(tag == 'v' + version and ref == 'refs/tags/' + tag,
+          'dispatch must run on the exact vVERSION tag (--ref vVERSION)')
+    project = re.search(r'^\[project\]\s*$(.*?)(?=^\[|\Z)',
+                        (repo / 'pyproject.toml').read_text(encoding='utf-8'), re.MULTILINE | re.DOTALL)
+    check(project is not None, 'project metadata missing')
+    configured = re.search(r'^version\s*=\s*"([^"\n]+)"\s*$', project.group(1), re.MULTILINE)
+    runtime = ast.parse((repo / 'work_assistant/__init__.py').read_text(encoding='utf-8'))
+    versions = [ast.literal_eval(node.value) for node in runtime.body if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == '__version__' for target in node.targets)]
+    check(configured is not None and configured.group(1) == version and versions == [version],
+          'dispatch version, project version and runtime version must agree')
+
+    def git(*args):
+        return subprocess.check_output(['git'] + list(args), cwd=repo, env=clean_environment(),
+                                       stderr=subprocess.PIPE, text=True).strip()
+
+    commit = git('rev-parse', 'HEAD')
+    check(git('rev-parse', '--verify', 'refs/tags/' + tag + '^{commit}') == commit,
+          'checked-out commit differs from release tag')
+    # The workflow fetches origin/main explicitly before this check. A missing
+    # main ref or a non-ancestor is a hard failure, never a fallback to HEAD.
+    git('merge-base', '--is-ancestor', commit, 'refs/remotes/origin/main')
+    validate_changelog((repo / 'CHANGELOG.md').read_text(encoding='utf-8'), version, released=True)
+    return {'version': version, 'tag': tag, 'commit': commit}
 
 
 def archive_files(artifact):
@@ -74,8 +138,9 @@ def audit(artifact, modules):
         check(not any(p.startswith('.env') or p == 'config.local.json' for p in path.parts), 'local config in archive')
         check(not name.endswith(('.pyc', '.pyo', '.db', '.sqlite', '.sqlite3')), 'runtime database/cache in archive')
     check(modules <= files.keys(), 'distribution is missing runtime modules: ' + str(sorted(modules - files.keys())))
+    check(PACKAGE_RESOURCES <= files.keys(), 'distribution is missing bundled practice resources')
     if artifact.suffix == '.whl':
-        check(all(name in modules or '.dist-info/' in name for name in files), 'wheel contains unexpected non-runtime files')
+        check(all(name in modules | PACKAGE_RESOURCES or '.dist-info/' in name for name in files), 'wheel contains unexpected non-runtime files')
         metadata_name = next(n for n in files if n.endswith('.dist-info/METADATA'))
         entry = next(n for n in files if n.endswith('.dist-info/entry_points.txt'))
         parser = configparser.ConfigParser()
@@ -94,11 +159,24 @@ def audit(artifact, modules):
     check({'Operating System :: MacOS', 'Operating System :: POSIX :: Linux'} <= set(metadata.get_all('Classifier', [])), 'supported platform metadata missing')
     check(metadata['License-Expression'] == 'MIT', 'SPDX license missing')
     changelog = files.get('CHANGELOG.md', (REPO / 'CHANGELOG.md').read_bytes()).decode('utf-8')
-    check('## [%s] - Unreleased' % metadata['Version'] in changelog, 'version/changelog heading mismatch')
+    validate_changelog(changelog, metadata['Version'])
+    check(metadata['Description-Content-Type'] == 'text/markdown', 'PyPI description must be Markdown')
+    validate_description(metadata.get_payload())
     urls = metadata.get_all('Project-URL', [])
     check(any(u.startswith('Repository, https://github.com/xilinshancun/work-assistant') for u in urls), 'repository URL missing')
     return {'artifact': artifact.name, 'sha256': hashlib.sha256(artifact.read_bytes()).hexdigest(),
             'files': len(files), 'version': metadata['Version']}
+
+
+def audit_distributions(artifacts):
+    wheels, sdists = sorted(artifacts.glob('*.whl')), sorted(artifacts.glob('*.tar.gz'))
+    check(len(wheels) == len(sdists) == 1, 'provide exactly one wheel and one sdist in the artifact directory')
+    check({p.name for p in artifacts.iterdir()} == {p.name for p in wheels + sdists},
+          'artifact directory must contain only the wheel and sdist')
+    modules = {str(p.relative_to(REPO)) for p in (REPO / 'work_assistant').rglob('*.py')}
+    results = [audit(p, modules) for p in wheels + sdists]
+    check(results[0]['version'] == results[1]['version'], 'wheel/sdist versions differ')
+    return wheels + sdists, results
 
 
 def smoke(artifacts, output, build_wheelhouse=None):
@@ -124,11 +202,7 @@ def smoke(artifacts, output, build_wheelhouse=None):
     if artifacts is None:
         artifacts = output / 'dist'
         run([sys.executable, '-I', '-m', 'build', '--outdir', artifacts, REPO], REPO, 'build')
-    wheels, sdists = sorted(artifacts.glob('*.whl')), sorted(artifacts.glob('*.tar.gz'))
-    check(len(wheels) == len(sdists) == 1, 'provide exactly one wheel and one sdist in the artifact directory')
-    modules = {str(p.relative_to(REPO)) for p in (REPO / 'work_assistant').rglob('*.py')}
-    results = [audit(p, modules) for p in wheels + sdists]
-    check(results[0]['version'] == results[1]['version'], 'wheel/sdist versions differ')
+    candidates, results = audit_distributions(artifacts)
     with tempfile.TemporaryDirectory(prefix='wa-package-smoke-') as temporary:
         scratch = Path(temporary).resolve()
         check(REPO not in scratch.parents and scratch != REPO, 'temporary installation must be outside the checkout')
@@ -137,7 +211,7 @@ def smoke(artifacts, output, build_wheelhouse=None):
             wheelhouse.mkdir()
             run([sys.executable, '-I', '-m', 'pip', '--isolated', 'download', '--index-url', 'https://pypi.org/simple',
                  '--only-binary=:all:', '--dest', wheelhouse, 'setuptools>=77.0.3', 'wheel'], scratch, 'build-tool-download')
-        for result, artifact, kind in zip(results, wheels + sdists, ('wheel', 'sdist')):
+        for result, artifact, kind in zip(results, candidates, ('wheel', 'sdist')):
             env_dir = scratch / (kind + '-venv')
             # The POSIX CLI defaults to symlinks. EnvBuilder's copy default can
             # break stdlib discovery for a directly launched uv-managed Python.
@@ -160,9 +234,27 @@ def smoke(artifacts, output, build_wheelhouse=None):
             check(Path(details['module']).is_relative_to(env_dir.resolve()), 'installed import escaped the clean venv')
             check(details['version'] == details['runtime_version'] == result['version'], 'package/runtime version mismatch')
             check(not details['requires'], 'installed runtime unexpectedly has dependencies')
+            version_text = run([wa, '--version'], cwd, kind + '-version')
+            check(version_text.strip() == result['version'], 'installed wa --version mismatch')
             help_text = run([wa, '--help'], cwd, kind + '-help')
             check('usage:' in help_text and 'demo' in help_text, 'installed wa help is incomplete')
             run([python, '-I', '-m', 'work_assistant', '--help'], cwd, kind + '-module-help')
+            evaluation_dir = output / (kind + '-evaluation')
+            evaluation = json.loads(run([wa, 'evaluate', '--output', evaluation_dir], cwd, kind + '-installed-evaluation'))
+            check(evaluation.get('schema') == 'wa.evaluation.v1' and evaluation.get('status') == 'passed',
+                  'installed evaluation failed')
+            check(evaluation == json.loads((evaluation_dir / 'receipt.json').read_text(encoding='utf-8')),
+                  'installed evaluation receipt differs from stdout')
+            example = cwd / 'practice-project'
+            run([wa, 'example', '--output', example], cwd, kind + '-installed-example')
+            check({p.name for p in example.iterdir()} == EXAMPLE_FILES, 'installed example files differ')
+            for name in EXAMPLE_FILES:
+                check((example / name).read_bytes() == archive_files(artifact)['work_assistant/resources/first_project/' + name],
+                      'installed example differs from bundled resource: ' + name)
+            count = run([python, '-I', example / 'count_records.py', example / 'records.txt'], cwd, kind + '-installed-count')
+            check(count.strip() == '5', 'installed example no longer reproduces its documented mismatch')
+            result['installed_evaluation'] = {'status': evaluation['status'], 'summary': evaluation['summary']}
+            result['installed_example_count'] = 5
             demo = json.loads(run([wa, 'demo', '--output', cwd / 'synthetic-demo'], cwd, kind + '-demo'))
             check(demo['hash'] == EXPECTED_DEMO and demo['preview'] == 'dry_run', 'offline demo changed/failed')
             report = Path(demo['report_path'])
@@ -205,13 +297,35 @@ def main():
     parser.add_argument('--artifacts', type=Path, help='Already built directory containing one wheel and one sdist')
     parser.add_argument('--build-wheelhouse', type=Path, help='Existing compatible setuptools/wheel build wheels; skips download')
     parser.add_argument('--output', type=Path, default=REPO / 'out/package-smoke', help='New directory for logs and synthetic reports')
+    parser.add_argument('--audit-only', action='store_true', help='Audit existing distributions without installing/building')
+    parser.add_argument('--release-version', help='Also validate this checkout as a release tag')
+    parser.add_argument('--release-tag', help='Exact tag, vVERSION')
+    parser.add_argument('--release-ref', help='Dispatch ref, refs/tags/vVERSION')
+    parser.add_argument('--manifest', type=Path, help='Write a NEW audited release bundle manifest (audit-only)')
     args = parser.parse_args()
     if os.name == 'nt':
         parser.error('runtime locking/demo smoke is supported on macOS/Linux, not Windows')
     try:
-        receipt = smoke(args.artifacts.resolve() if args.artifacts else None, args.output.resolve(),
-                        args.build_wheelhouse.resolve() if args.build_wheelhouse else None)
-    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        identity = None
+        if any((args.release_version, args.release_tag, args.release_ref)):
+            check(all((args.release_version, args.release_tag, args.release_ref)), 'provide version, tag and ref together')
+            identity = validate_release(args.release_version, args.release_tag, args.release_ref)
+        if args.audit_only:
+            check(args.artifacts is not None, '--audit-only requires --artifacts')
+            _, results = audit_distributions(args.artifacts.resolve())
+            receipt = {'schema': 'wa.release.bundle.v1', 'artifacts': results}
+            if identity:
+                check(all(r['version'] == identity['version'] for r in results), 'release artifact version mismatch')
+                receipt.update(identity)
+            if args.manifest:
+                check(identity is not None, '--manifest requires a validated release identity')
+                with args.manifest.open('x', encoding='utf-8') as stream:
+                    json.dump(receipt, stream, indent=2); stream.write('\n')
+        else:
+            check(args.manifest is None, '--manifest requires --audit-only')
+            receipt = smoke(args.artifacts.resolve() if args.artifacts else None, args.output.resolve(),
+                            args.build_wheelhouse.resolve() if args.build_wheelhouse else None)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
         parser.exit(1, str(exc) + '\n')
     print(json.dumps(receipt, ensure_ascii=False, indent=2))
 

@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-work-assistant"
-version = "0.1.0"
-description = "Local-first personal assistant with durable evidence and explicit publishing"
-readme = "README.md"
+version = "0.1.0a1"
+description = "Developer work assistant for Codex and Claude Code: traceable tasks, evidence, and reports"
+readme = {file = "docs/pypi.md", content-type = "text/markdown"}
 requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -39,3 +39,6 @@ wa = "work_assistant.cli:main"
 [tool.setuptools.packages.find]
 include = ["work_assistant*"]
 namespaces = false
+
+[tool.setuptools.package-data]
+work_assistant = ["resources/first_project/README.md", "resources/first_project/count_records.py", "resources/first_project/records.txt"]
