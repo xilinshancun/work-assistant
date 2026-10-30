@@ -1,4 +1,4 @@
-include README.md LICENSE SECURITY.md PLAN.md AGENTS.md CONTRIBUTING.md CHANGELOG.md
+include README.md README.en.md LICENSE SECURITY.md PLAN.md AGENTS.md CONTRIBUTING.md CHANGELOG.md
 include examples/config.example.json
 include examples/config.lark-cli.example.json
 include examples/config.timeline.example.json
@@ -12,6 +12,7 @@ include scripts/package_smoke.py
 recursive-include .github *.yml *.md
 recursive-include tests test_*.py
 recursive-include docs *.md
+include docs/assets/demo-report.png
 prune .wa
 prune .local
 prune .venv

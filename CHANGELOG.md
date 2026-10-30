@@ -22,6 +22,10 @@ or production support.
 
 ### Packaging and community
 
+- Chinese/English entry guides, an actual synthetic demo screenshot, layered
+  capability/recovery documentation and an evidence-based positioning roadmap.
+- Provider readiness and workflow-specific doctor guidance; unresolved asks
+  expose read-only inspection steps for the original task instead of replaying it.
 - Installable `local-work-assistant` wheel and sdist with the `wa` console entry
   point; the installed runtime has no third-party dependencies.
 - Complete synthetic daily-bundle source fixtures, contribution/release guidance

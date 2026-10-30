@@ -25,6 +25,9 @@ EXPECTED_DEMO = '9b64c0da68f8d0e975160f084331662c07f902458d04afcf480296667d65f04
 REPORT_FILES = {'index.html', 'daily-sync.md', 'evidence.html', 'evidence.json',
                 'card.json', 'document.json', 'card-preview.html'}
 SOURCE_FILES = {'README.md', 'LICENSE', 'SECURITY.md', 'pyproject.toml', 'MANIFEST.in',
+                'README.en.md', 'docs/README.md', 'docs/quickstart.md', 'docs/quickstart.en.md',
+                'docs/capabilities.md', 'docs/positioning.md', 'docs/troubleshooting.md',
+                'docs/guide.md', 'docs/assets/demo-report.png',
                 'CONTRIBUTING.md', 'CHANGELOG.md', 'docs/releasing.md',
                 'scripts/package_smoke.py', 'examples/daily-bundle/state.json',
                 'examples/daily-bundle/daily/2026-01-15.html',

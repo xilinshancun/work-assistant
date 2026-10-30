@@ -1,4 +1,23 @@
-# 安全模型
+# Security / 安全模型
+
+## Reporting a vulnerability / 报告漏洞
+
+For credential exposure, authorization bypass, unintended replay, or another
+security vulnerability, use [GitHub private vulnerability reporting](https://github.com/xilinshancun/work-assistant/security/advisories/new).
+Do not disclose exploit details, credentials, private journals, or company data
+in a public issue. Include the commit/version, affected boundary, and a minimal
+synthetic reproduction. If private reporting is unavailable, open a public issue
+requesting a private contact **without** sensitive details.
+
+涉及凭证泄漏、权限绕过、意外重放等漏洞，请使用上述私密入口。普通功能故障可按
+[贡献指南](CONTRIBUTING.md) 提交脱敏 issue。若真实凭证已泄漏，应先在凭证所属服务撤销或轮换；删除 Git 中的文件不能撤销凭证。
+
+This is an alpha project. Security fixes target the current development branch;
+there is no LTS/backport policy or guaranteed response SLA. An acknowledged report
+does not mean a fix has shipped. Review the changelog and the exact patch before
+upgrading, and back up private state.
+
+## Trust boundaries / 信任边界
 
 项目配置和 CLI 操作来自本机用户。模型输出、上传材料、源文件与提供商日志均为不可信输入。配置中的 argv、环境覆盖、工作目录和 grants 是可信的本机设置，不能由路由 JSON 填写。请只给自己信任的目录建立项目。
 
@@ -20,4 +39,4 @@ Codex 的文件沙箱不约束 MCP 的外部效果。每次调用前必须以相
 
 V1 并发锁实现面向 macOS/Linux；Windows 目前不支持实际任务运行的 flock，不能声称具有相同并发保证。SQLite 迁移只接受 schema v1，未来版本必须显式迁移。
 
-发现问题请在仓库报告不含敏感数据的最小复现；不要将凭证、公司文档或私人运行数据库附在公开 issue 中。
+更多使用边界见 [能力表](docs/capabilities.md)。公开导出前仍需人工核查；脱敏规则和自动化测试不能证明所有秘密都已被识别。

@@ -1,0 +1,314 @@
+# 详细操作参考
+
+[返回文档首页](README.md) · [从零上手](quickstart.md)
+
+本文保留完整命令、协议与恢复细节；首次使用先走 quickstart。
+
+复用已安装的 DeepSeek Harness、Claude Code 和 Codex，把任务、执行记录、证据、更正和日报留在本机。Python 3.9+，运行时只有标准库，不需要 pip。MIT 开源。
+
+Local-first personal assistant with two-stage routing, durable task history, attributed evidence, offline reports, and explicitly authorized Feishu publication.
+
+## 五分钟无凭证离线运行
+
+在仓库根目录执行：
+
+```sh
+python3 -m work_assistant demo --output out/demo
+python3 -m unittest discover -s tests -v
+python3 -m compileall -q work_assistant
+```
+
+demo 输出 JSON 内的 `report_path` 指向报告目录。用浏览器打开其中 `index.html`，查看五部分 Daily Sync、源数据柱图与证据明细；`card-preview.html` 是飞书原生文字卡片的本地预览。全部文件自包含，无 CDN。demo 的模型和观测均是确定性合成 fixture，不联网、不验证真实提供商、不发消息。重复使用完整 demo 目录会返回原结果；不完整目录请换一个输出位置。
+
+交付文件：`index.html`、`daily-sync.md`、`evidence.html`、`evidence.json`、`card.json`、`document.json`、`card-preview.html`。在不同目录新跑 demo，报告内容哈希相同。状态数据库、工作区和源观测留在输出目录，不提交 Git。
+
+从源码路径只需要 Python 3.9+：克隆本仓库、进入目录，直接执行上述 `python3 -m work_assistant`，不需要虚拟环境、模型凭证或第三方包。
+
+正常安装路径可在隔离虚拟环境中执行：
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install .
+.venv/bin/wa demo --output out/installed-demo
+```
+
+安装过程需要 setuptools 构建工具；安装后的运行时仍无第三方依赖。开发者可改用 `pip install -e .`。源码路径在断网机器可直接运行，安装路径是否需联网取决于本机已有构建工具。
+
+提供商均通过已有本机 CLI 选择使用，demo、证据、报告、dry-run 均不需要安装任何模型 CLI。DSH 可选：缺失/不可运行时记录原因并升级到 Codex GPT planner；要在没有 DSH 时使用真实 route，需要已安装并登录的 Codex。Claude 是可选执行器；只安装 Codex 时可固定任务 `--provider codex` 执行，但独立的相反提供商 review 需要 Claude。DSH+Claude 可处理直接路由给 Claude 的任务；需要 GPT 升级而 Codex 不可用时会诚实进入 needs_user。Paseo 完全可选，不是 Python 包依赖，也不需要其 CLI。
+
+## 配置和任务
+
+最短真实使用路径（先安装并登录自己要用的提供商；DSH 可选）：
+
+```sh
+python3 -m work_assistant init
+python3 -m work_assistant project add my-project --workspace .
+python3 -m work_assistant ask my-project '只读检查 README 与当前实现的一致性' --provider codex
+```
+
+`ask PROJECT GOAL` 创建一个新任务，复用 task → route → run；输出始终包含已创建的 task_id，遇到 failed/unknown/needs_user 就停止，后续可用 `task show`、`reconcile` 或显式 `run --followup` 继续处理。不会自动发布。需要独立审查时加 `--review`，需要报告时加 `--report-date 2026-01-15`；它们都是可选步骤，前面的步骤不成功就不继续。写入必须显式给出 `--intent write_workspace`，且项目已有对应 grant，ask 不会创建授权。每次 ask 是一次新的用户动作，不会自动重放先前未知运行。
+
+例如完整只读旅程：
+
+```sh
+python3 -m work_assistant ask my-project '检查当前文档并报告可复现的问题' --provider codex --review --report-date 2026-01-15
+```
+
+下面的底层命令仍可逐步使用，便于检查或续接指定任务。
+
+```sh
+python3 -m work_assistant init
+python3 -m work_assistant doctor --json
+python3 -m work_assistant project add my-project --workspace .
+python3 -m work_assistant project list
+python3 -m work_assistant task add my-project '只读检查 README 与当前实现的一致性'
+python3 -m work_assistant task list --project my-project
+```
+
+复制输出中的 task ID，依次调用：
+
+```sh
+python3 -m work_assistant route TASK_ID
+python3 -m work_assistant run TASK_ID
+python3 -m work_assistant review TASK_ID
+python3 -m work_assistant task show TASK_ID
+python3 -m work_assistant run TASK_ID --followup '再检查刚才结果中的一个具体问题'
+```
+
+把 `TASK_ID` 替换为实际 ID。`route` 仅分类，DSH 超时、报错、低置信度、复杂任务、无效 JSON 或调用工具时最多升级一次到 Codex planner；planner 失败进入 needs_user。有效 planner 可执行复杂任务，不能扩大用户授权。默认执行器建议架构/审查交 Claude、实现交 Codex。任务可用 `--provider codex|claude_code` 固定执行器，也仍受项目 grants 约束。
+
+要授权一个独立可写项目，创建时显式给出两个 grant，任务也要声明写 intent：
+
+```sh
+python3 -m work_assistant project add writable-project --workspace . --allow read --allow write_workspace
+python3 -m work_assistant task add writable-project '在工作区添加合成示例文件' --intent write_workspace
+```
+
+编码进程必须有终态成功才标记 completed。写任务完成时仍未 verified；`review` 用相反提供商以只读权限检查实际工作区、结果和受锁保护的 git diff，保留 host git 观测与模型判断。只有结构化 pass 才设置 independently reviewed；这不是科学复现证明。进程仅启动、exit=0 报错、权限拒绝、没有最终结果都不算成功。CLI 的错误、failed、needs_user、unknown 返回 2，中断返回 130。
+
+`protocol_status=completed` 仅说明提供商协议成功结束；`goal_status=unverified` 表示用户目标尚未独立核验。task 的 completed 是执行阶段状态，模型可能只报告“无法读取文件”，仍必须核查实际产物/运行 review，不能据此声称目标已实现。报告会明确显示 `protocol completed; goal unverified`。review 未通过返回 2；SIGTERM 返回 143。Claude 写任务仅允许 Read/Glob/Grep/Edit/Write，不开放 Bash。两个可写项目不能注册相同或互为祖先的工作区。
+
+配置默认 `config.local.json`，状态默认 `.wa/`，均被忽略。`--config PATH` 放在子命令之前。所有配置相对路径以配置文件所在目录为基准，支持 `~`；`project --workspace` 同样遵循该规则。证据命令中的源路径相对当前工作目录。参考 [合成配置](../examples/config.example.json)。可配置每个提供商的 argv 数组、env、timeout、model，Codex 的 planner_effort/executor effort；不拼 shell，不自动切账号。显式本地 `CODEX_HOME` 可绑定已登录账号，仓库不包含个人路径或账号设置。
+
+`doctor` 检测安装与本机 help 能力，不测试登录、不消费模型。macOS 自动发现标准 Applications 下的 DSH。实际协议为 DSH headless JSON、CC print JSON、Codex exec JSONL；实现依据本机 help，详见 [设计规范](../PLAN.md)。DSH 分类设置 `DSH_PERMISSION_MODE=read-only`，没有向旧版本传不存在的权限 flags。classifier/planner 使用临时空工作目录，仅接收任务分类输入；真实项目路径只交给执行器。具体登录/profile overlay 由本机用户维护，不打印完整配置。安装版 DSH 0.2.1-rc.3 源码确认 session 的 `sessionId`、`status.phase=turn_end` 的 `reason.kind=completed` 和最后 `final.text`；三者中终态成功、非空 final 与 exit 0 缺一即拒绝，失败/截断状态不可忽略。成功 fixture 来自安装包协议源码；已于 2026-10-29 在 macOS 的 DSH 0.2.1-rc.3 桌面账号登录下完成真实路由验证。其他安装环境仍需自行检查认证与版本兼容性。
+
+该安装版可能将一行 `[llm-deepseek-account] model listing from https://api.deepseek.com/models loaded N model(s), skipped N row(s)` 诊断写入 stdout。适配器只过滤这个已实证格式；未知非 JSON 行和损坏 JSON 都拒绝，脱敏原始日志仍保留。Codex 的 item 级开发功能 warning 不等于 turn.failed。
+
+若已登录 DSH 桌面账号，headless profile 却没有凭证服务，可自行创建忽略提交的 `.wa/dsh-desktop-account.yml`：
+
+```yaml
+- id: credentials
+  disabled: false
+- id: authorization
+  disabled: false
+- id: deepseek-account
+  disabled: false
+- id: agent-default-model
+  config:
+    provider: deepseek-account
+    model: deepseek-flash
+```
+
+这是已安装 0.2.1-rc.3 的桌面账号 overlay 示例；`model` 应与自己的桌面选择一致，示例别名不是应用默认值。只在本地 `config.local.json` 的 `providers.dsh` 中添加 `"patches": [".wa/dsh-desktop-account.yml"]`。patch 路径相对配置文件解析；启动时仅通过 `--patch` 临时覆盖，不更改 DSH 用户配置、不附带账号或 API key。不同安装版本需核对本机 help/服务配置，未登录时仍会明确失败并升级 planner。
+
+进程环境保留用户配置与凭证。若继承的 `PASEO_*` 元数据含非 UTF-8 值，会移除这一无效元数据键并记录 diagnostics，避免 Rust CLI 在枚举环境时 panic；其他无效用户环境会在启动前明确报错，不静默改变授权或凭证。
+
+所有 Codex 调用（分类、执行、跟进）都先以相同 argv 基础配置、环境和 cwd 运行有界的 `mcp list --json`。仅接受 `[A-Za-z0-9_-]+` 名称，按安全的 `transport.type` 使用无引号路径和完整 inline table：stdio 使用 `{command="wa-mcp-disabled",enabled=false}`，streamable_http 使用 `{url="http://127.0.0.1:9/wa-disabled",enabled=false}`；未知类型拒绝。再带覆盖参数执行一次 list，名称集合与 transport 类型必须一致且全部 disabled。doctor 也走相同的复核路径。无此命令、超时、截断、畸形输出、不合规名字或复核失败都阻止 exec，且 `launched=false`；不降级绕过。预检两次合计最多 10 秒、每路输出 128 KiB、512 个服务器；仅提取 enabled 与 transport.type，不保存原 command/url/env/auth，不改全局配置。检测到本机 Codex 时，离线测试会用隔离的合成 stdio/HTTP 配置运行真实 list 验证覆盖语法，不调用模型或 MCP 工具。
+
+每次 Codex 调用同时覆盖 `features.apps=false`、`web_search="disabled"`、`sandbox_workspace_write.network_access=false`，不修改全局配置，保留模型自身连接和订阅认证。V1 暂不提供外部连接器调用，真实业务研究需要用户后续明确扩展权限；read/write grant 不隐含外部应用写入。配置键参考 [官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+
+## 证据、更正与报告
+
+```sh
+python3 -m work_assistant evidence add my-project examples/sample-observation.json --scope 'synthetic local example' --origin 'operator fixture'
+python3 -m work_assistant claim add my-project '样本数为 10' --evidence EVIDENCE_ID --attribution 'fixture operator' --numeric '{"key":"samples","value":10,"unit":"items"}'
+python3 -m work_assistant claim supersede OLD_CLAIM_ID --replacement NEW_CLAIM_ID --reason '去重后更正'
+python3 -m work_assistant claim retract CLAIM_ID --reason '源观测已撤回'
+python3 -m work_assistant report my-project --date 2026-01-15
+python3 -m work_assistant publish REPORT_ID --dry-run
+```
+
+`EVIDENCE_ID`、`CLAIM_ID`、`REPORT_ID` 替换为输出 ID。数字明确与源 JSON `values` 的 value/unit 比对；文本中出现相同数字不等于验证。缺乏数字时不生成虚构百分比。手工等级可选 measured/reproduced/derived/code_observed/reported，并始终保留 attribution 和校验范围。derived 需要 `--derivation '公式' --input CLAIM_ID`；程序检查输入链存在、有效，不执行公式。源文件精确复制、哈希校验，原文件不变。报告先递归脱敏字符串再序列化，带引号和反斜杠的模型文本不会破坏 JSON。
+
+`evidence ingest` 只读取配置 `ingest_paths` 中列出的精确文件，不改其他项目的源数据。报告基于有上限的一致性快照，当前实现每个快照最多 1000 条任务/结论/更正/证据，原始文件每份最多 20 MiB，观测预览最多 32 KiB。所有已知事实按新到旧排列；日期是报告归档周期，既有任务与跨周期更正继续显示，并非只截取当天事件。游标记录成功快照的收集边界；新快照保留完整的当前事实和更正，旧快照不可变。文件全部写好后才提交快照/游标；发布失败不影响收集。没有来源的责任人、截止期或承诺不会被自动添加。
+
+## 导入已有的本地日报
+
+已有收集器可继续生成自己的日报，使用 `import-daily` 将一个显式指定的 bundle 导入当前项目。此命令只生成普通的不可变 report，不调用模型、不联网、不发送消息，不修改源文件，也不创建或调整 schedule。下面是仓库内的纯合成示例，可直接离线运行：
+
+```sh
+python3 -m work_assistant init
+python3 -m work_assistant project add imported-demo --workspace .
+python3 -m work_assistant import-daily imported-demo --source-root examples/daily-bundle --date 2026-01-15 --timezone Asia/Shanghai --body-scope main
+python3 -m work_assistant publish REPORT_ID --dry-run
+```
+
+将 `REPORT_ID` 换成导入结果的 `id`。真实使用时由用户显式指定自己的 bundle 目录和当天日期；`--timezone` 默认 `Asia/Shanghai`。可用 `--title '合成日报 · 2026-01-15 提前预览'` 覆盖展示标题（非空，最多 200 字符），默认取源 h1；覆盖只改变展示和报告哈希，不修改源文件、正文或日期发布身份。历史归档可显式指定过去日期，不能把旧执行日期冒充今天。重复示例时使用已有项目即可。源 bundle 的结构见 [合成 state](../examples/daily-bundle/state.json)、[合成 evidence](../examples/daily-bundle/evidence/daily-2026-01-15.json) 和 [合成 HTML](../examples/daily-bundle/daily/2026-01-15.html)。
+
+`--title` 可用于首次发布或本地预览。默认 `per_period` 模式中，同一目的地＋项目＋周期已经发布后，publisher 不自动修改云文档的 metadata title；后续报告若标题不同，publish 会明确失败并停止文档及消息写入。修订正文或卡片时须沿用已发布标题；云端改名需要另行明确处理，不会通过新建文档或文字消息绕过。
+
+bundle 根目录的 `state.json` 提供 `timezone` 以及 `daily.last_report`、`daily.last_evidence`、`daily.last_successful_execution_date`、`daily.covered_until`。两个文件路径在解析符号链接后必须仍位于 bundle 内。evidence 要求 `report_type=daily`，其 `execution_date` 或 `report_date` 至少提供一个，所有已提供的日期、state 的成功执行日期与 `--date` 必须一致；别名同时存在时不允许冲突，不会向源补写字段；两处 timezone 与命令一致；覆盖区间起点早于终点，state/evidence 的终点字符串一致，终点转换到所选时区后的日期必须等于请求日期，不允许未来的终点或执行日期。区间时间戳须有时区偏移，可使用 UTC `Z`。必须提供 `validation.status=passed`，并让 `validation.report_sha256` 等于源 HTML **原始字节**的 SHA-256。缺失、过期、未通过校验、哈希不符或读取期间发生变化均明确报错，不能退回旧日报。
+
+HTML 使用 body 中首个可见 h1 提供默认展示标题，并要求唯一的 `id="sync-summary"` 和唯一的可见 `main`。外部文档只从 main 提取正文：正式标题仅放 document 元数据；main 内的 article／header／footer 正文和后续 h1 保留。默认 `--body-scope strict` 仅排除首个标题 h1 与显式 nav 等已排除元素，main 外的其他可见文字（包括 header 中的采集不完整限定、覆盖说明或 footer 说明）一律明确拒绝，绝不整段猜测并删除 header／footer。对于已由用户逐字核验、确认 main 包含完整业务内容的固定模板，可显式选择 `--body-scope main`：仅导出 main，忽略外层 header／footer；选择写入快照和私有记录的 `import_options.body_scope`，参与哈希，原始可见 body 仍留在本地证据中供核查。它不会修改源，也不赋予任何发布权限。正文先生成一行自然中文覆盖区间，例如“10月28日 17:30—10月29日 17:30 · 北京时间”；其他时区显示 zone 名，跨年区间保留年，完整秒精度仍保存在元数据。h1…h6 → 原生 heading1…heading6（block_type 3…8）、普通 p → text（2）、li 和摘要内的 p → bullet（12）；details 的 summary → heading2，折叠正文保留。strong／b、em／i、s／del 分别写入原生 text_run.text_element_style.bold／italic／strikethrough；删除线也保留在本地预览、Markdown 和卡片中，避免把划掉的结论变成事实。mark、time、abbr、kbd、ins、label 等受支持的标准内联元素保持同一段／列表项，kbd／code 记为 inline_code，ins／u 记为 underline。sup／sub／q 等暂不能可靠表示的语义以及未知可见元素明确拒绝，不扁平化、不改写。原文限定逐字保留，不调用模型重写。紧凑表格保留单元格／行边界，单元格中的 p／div 等子块用分隔符区分，避免 10 和 20 拼成 1020；pre 保留行结构；支持可选闭标签，歧义嵌套明确拒绝。原始可见 body 和 summary 另存本地证据快照，便于对照。
+
+固定模板的一次性调用／wrapper 配置方法：在现有 `import-daily PROJECT --source-root ROOT --date YYYY-MM-DD` 参数后追加 `--body-scope main`；未明确核验 main 的未知模板继续使用默认 strict。此前已生成的不可变快照不改写；scope 变化会产生新的报告哈希。
+
+正文 a 标签仅对安全的绝对 HTTP(S) 目标生成原生 `text_run.text_element_style.link.url`（按官方 schema 对完整 URL 编码），支持与 bold／italic 等组合。本地预览也可点击这些链接；相对／本地导航和 javascript 等目标仅保留标签文字，不生成外链。链接目标也只保留标签、不输出地址的情况包括 localhost／*.localhost、.local／.internal、单标签主机，以及由 ipaddress 识别的非公网或组播 IP（含 loopback、私网、link-local、IPv4-mapped IPv6）；大小写、尾部点和端口不绕过检查。不做 DNS 查询，普通多标签域名是否在使用者内网中无法据此判断，不会猜测。原始 href 先通过凭证／本地路径检查，含敏感 query／fragment、userinfo 或非法控制字符的 HTTP 链接拒绝且诊断不回显 URL；每条 HTTP 链接最多 8192 字符。
+
+卡片保留蓝标题，从摘要首个内容段取 lead（跳过 Sync 精简版等标题），安全转义后用 lark_md 加粗；hr 后的其余原段落各占独立 bullet div（默认 plain_text；有删除线时使用安全转义的 lark_md 保留删除语义），底部灰色 note 显示“工作助理 · 项目名 · 截至 MM-DD HH:MM”。不从无依据数据生成重点、不截断原文。远端文档 ID 在发布时才可知，发布器负责在最终 note 前插入 type=default 的描边文档按钮；本地 card-preview.html 展示对应描边按钮，不伪造远端 URL。index.html 和卡片预览展示真实 heading／bullet／bold／italic 结构，全部文字转义、自包含。内部证据、源路径、JSON 明细和技术校验说明不会追加到远端文档／卡片；本地 evidence.html／json 留作单独核查。
+
+原生字段依据[官方 Docx SDK 模型](https://github.com/larksuite/oapi-sdk-go/blob/v3_main/service/docx/v1/model.go)及[创建块 API](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/create)，卡片依据[官方 Markdown 转义规则](https://open.feishu.cn/document/common-capabilities/message-card/message-cards-content/using-markdown-tags)和[按钮／分隔线／备注示例](https://open.feishu.cn/document/common-capabilities/message-card/add-card-interaction/interactive-components/button?lang=zh-CN)。原生文档更新需要支持 typed blocks 的发布器；旧的仅 text 发布器不能作为 heading／bullet 的发布验收。
+
+evidence 的 `items` 可缺省为空列表；提供时每项含 `id`、`claim`、`source_ids`，引用 `sources` 的 `id`。也支持 `source_mapping` 对象，形如 `{"progress":["s_build","s_test"],"support":["s_scope"]}`，其 section 为非空字符串，值为引用已有 source ID 的非空字符串数组；本地保留原映射并标为 reported，不生成业务 claim，远端不追加映射。映射也可引用 `pr_observations` 列表中的 ID：每项必须有非空 `id`、`verified_at`，与 sources 合并为可引用 ID 域，任一集合内或两集合间重名均拒绝，未知引用仍拒绝。本地证据以 kind 区分 source 与 pr_observation，PR 仅选取 id／kind／verified_at，不生成摘要或 claim；完整 URL、作者、状态、review、checks、note、verification_history 等原始字段保留在私有 journal，远端不追加。每个普通 source 的 `id` 必需，引用完整性照常校验；`verified_at` 缺省时本地明确显示“源未提供验证时间 / Not supplied”，不补造日期，字段存在时仍须是非空且最多 100 字符的文字。普通 sources 一律标为 reported，用户后续指令来源不会变成已完成业务成果；PR observations 的 `verified_at` 仍必需。`summary` 缺省时本地显示“源未提供摘要 / No source summary supplied”，不从 facts、limits 或 note 推造摘要，原始字段留在私有元数据；summary 存在时仍严格校验文字。`limitations` 为文字列表。这些相关字段仅保留在本地证据产物，额外元数据保留在私有 journal，勿提交或直接分享 journal。标题最多 200 字符，短摘要最多 6000 字符；源摘要／结论／局限每项最多 2000 字符，证据摘要最多 64 KiB、共 1000 项；state 最多 1 MiB，源 HTML／evidence 各最多 20 MiB。原生文档最多 1000 块（含覆盖行）；每块最多 10000 个字符／1000 个 text runs。超过限值明确拒绝，不拆分语义段、不静默截断详情。
+
+导入采用独立的安全导出规则，不使用通用 redact 的宽泛替换：普通数量和参数说明（例如 `max token: 4096，password=至少12位`）原样保留；路径检查允许 HTTP(S) URL 的站点和普通 URL path，但仍检查其 query／fragment 内的本地路径（含百分号编码）；参数最多解码 8 层，过深或无法安全解析时拒绝。检查不修改输出，Windows 驱动检测要求词边界，不把 https 协议误判为驱动。可识别的本地绝对路径、明确凭证格式和凭证赋值会拒绝导出，报错只给类别，不回显敏感内容。规则不读取环境中的凭证，也不宣称可以识别所有秘密；需由源报告作者确保正文适合分享。
+
+同一输入字节、日期和元数据返回同一个报告 ID／哈希；已校验的同日报修订生成新快照，旧快照保持不可变。重复生成相同可信内容时可恢复缺失的产物，保留原报告 ID；所有尚存文件先核对哈希，发现篡改仍拒绝，不覆盖已有文件。导入不收集本项目之前的任务和结论，也不推进普通 report 的收集游标。后续 `publish`／`reconcile` 继续使用现有授权、checkpoint 和未知结果规则：相同内容 no-op；同目的地＋项目＋日期的修订复用文档／消息 ID；未知结果不能因再次导入而重发。定时流程只需在原收集器结束后显式调用 import-daily，导入成功后再按既有授权发布；导入失败就回报原因。
+
+## 飞书预览和真实发布
+
+dry-run 不需要凭证也不联网。真实自建应用模式需要设置配置所引用的 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_RECEIVE_ID`；可选 `FEISHU_FOLDER_TOKEN` 指定应用可编辑的文件夹。应用必须拥有文档创建/编辑及向该接收者发消息的权限，机器人需在目标群/用户可见范围内，报告文档应由本工具独占编辑。秘密仅放环境变量；不要写入仓库。
+
+```sh
+python3 -m work_assistant publish REPORT_ID --confirm
+```
+
+每位使用者需要在自己的飞书租户建立自建应用或 Webhook，使用自己有权限的文档空间和目的地；仓库不附带共享应用、租户、机器人或账号。先用自己专用的测试目的地验收。没有配置时明确报错。开发者已在自有测试私聊验证应用模式的文档创建、本人权限分享、卡片发送、同文档／同卡片更新与重复发布 no-op；离线 HTTP server 另外覆盖故障状态。应用模式创建/更新 docx 文档块和 interactive 卡片，保存文档、块、消息 ID。相同目的地+项目+周期复用资源；相同内容无请求；变更内容更新已有资源。单个 CLI 对真实 API 节流，服务端应用错误仍立即失败。Webhook 设置 `publisher.mode=webhook` 并配置 `FEISHU_WEBHOOK`，只发送卡片，文档留本地；Webhook 没有消息更新能力，已发布周期的新内容会明确拒绝，需改用应用模式。
+
+精确预配置目的地 grant 使用 `app:<sha256([app_id,receive_id_type,receive_id,folder_token])>` 或 `webhook:<sha256(webhook_url)>`，序列化规则为 UTF-8、排序 key、紧凑 JSON，与代码 `util.digest` 一致。grants 默认空；通常使用逐次 `--confirm` 即可，模型输出不能建立 grant。
+
+官方 API 参考：[租户 token](https://open.feishu.cn/document/server-docs/authentication-management/access-token/tenant_access_token_internal)、[创建文档](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/create)、[创建块](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/create)、[更新块](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document-block/patch)、[发送消息](https://open.feishu.cn/document/server-docs/im-v1/message/create)、[更新卡片](https://open.feishu.cn/document/server-docs/im-v1/message/patch)。
+
+### 可选：使用官方 lark-cli securestore
+
+默认 `publisher.transport=http` 继续使用上述环境变量凭证；Webhook 行为不变。若凭证已由[官方 lark-cli](https://github.com/larksuite/cli) 管理，可使用 `lark_cli` transport（仅应用模式），无需向 Work Assistant 提供 `FEISHU_APP_SECRET` 或 tenant token。CLI 由使用者另外安装，Python 包仍没有运行时依赖。
+
+从 [config.lark-cli.example.json](../examples/config.lark-cli.example.json) 复制配置。先在自己租户按官方流程注册应用；如下隔离目录由 CLI 保存配置及 securestore 引用，请保留，不要提交到 Git：
+
+```sh
+mkdir -p private-lark-cli
+chmod 700 private-lark-cli
+LARKSUITE_CLI_CONFIG_DIR="$PWD/private-lark-cli" lark-cli config init --new --brand feishu --name work-assistant
+LARKSUITE_CLI_CONFIG_DIR="$PWD/private-lark-cli" lark-cli --profile work-assistant config show
+```
+
+把脱敏 `config show` 的 `appId` 填入 `expected_app_id`。将示例保存为 `config.local.json`，按自己的 CLI profile 设置 `cli_profile`（可以省略以选择该隔离配置的默认应用），设置目的地 `FEISHU_RECEIVE_ID`，必要时设置自己的 `FEISHU_FOLDER_TOKEN`。应用仍须拥有文档、消息及机器人权限，且能访问目标文档空间和接收人。接收人、群及文件夹属于使用者自己的租户；本项目不提供共享机器人。
+
+```sh
+python3 -m work_assistant doctor
+python3 -m work_assistant publish REPORT_ID --dry-run
+python3 -m work_assistant publish REPORT_ID --confirm
+```
+
+`cli_argv` 是可信本地命令数组，支持包装命令或 CLI 的绝对路径；`cli_config_dir` 和命令首项的相对路径均相对 Work Assistant 配置文件解析。`cli_timeout` 默认 30 秒，上限 300 秒。doctor 只调用本地脱敏 `config show`，显示 CLI 是否可用、App ID 是否匹配；不代表权限或真实发布已通过。每次实际发布先再次核对选中应用和 Feishu 品牌，再以 bot 身份只读探活，随后才写入待发送请求。CLI 子进程使用完整环境白名单，排除继承的 Lark/Feishu 凭证、授权代理、profile、其他宿主 workspace，以及普通代理变量，避免误用旧机器人。需代理的部署应先自行核验网络环境；不要把 token 放进 `cli_argv`。
+
+可选文档访问配置同时适用于 HTTP 和 lark_cli：`document_member_env` 引用一个用户明确批准的本人 open_id 环境变量（示例为 `FEISHU_DOCUMENT_MEMBER`），`document_member_perm` 默认 `edit`，也可在可信本地配置中选择 `full_access`。未配置 `document_member_env` 默认不分享；不需要分享时请删除示例中的该字段。配置后必须提供有效的 `ou_…` 用户 ID；不会给群或公开链接授权。创建文档后通过 `docs:permission.member:create` 权限添加此成员，关闭通知，并在发卡片前保存授权 checkpoint；同一成员和权限不会重复 grant。变更成员或权限会使用新的发布身份和文档，不会把旧文档静默分享给新成员，也不会自动撤回旧授权。
+
+应用模式发送的卡片自动增加“打开 Daily Sync”原生按钮，指向 `https://www.feishu.cn/docx/{document_id}`。此标准入口采用[官方 CLI 的资源 URL 规则](https://github.com/larksuite/cli/blob/main/shortcuts/common/resource_url.go)，由飞书跳转至文档所属租户；打开后仍需具备文档访问权限。本地报告快照保持不变；Webhook 只有本地文档，不添加云文档按钮。
+
+升级前已完成的同内容报告仍保持 no-op，不因新增按钮而自动改写旧卡片；下一次报告内容变化时再正常更新已有资源并添加按钮。
+
+两个 transport 共用发布和 reconcile 状态机。CLI query 通过 `--params` 传入，JSON body 通过标准输入；原始 CLI 输出和凭证不会进入报告或错误记录。明确的认证、输入、权限拒绝记为 failed；写请求超时、进程中断、5xx 或损坏输出保留 unknown，禁止自动补发。认证探活失败发生在发布写入之前，可检查后显式 `--retry`。同内容仍无请求，变化内容更新已知文档和消息；换 transport 时应用与目的地必须保持一致。离线 FakeCLI 覆盖此协议和故障流程，不代表真实租户验收；live 权限和产物由使用者另行检查。
+
+### 可选：固定文档按日期累积
+
+默认 `publisher.document_layout=per_period` 继续每个周期一份文档。需要同一项目共用一份 Daily Sync 时，在原有应用配置上设置以下字段，或参考 [timeline 配置示例](../examples/config.timeline.example.json)。HTTP 与 lark_cli 应用模式均支持；Webhook 不支持 timeline。
+
+```json
+{
+  "document_layout": "timeline",
+  "timeline_title": "Project Daily Sync",
+  "timeline_max_blocks": 3000
+}
+```
+
+此配置由使用者管理，模型输出不能切换布局或创建授权。`timeline_title` 只决定新建固定文档的标题；已有绑定的标题不会随配置或日报标题自动改变。文档每个日期以原生 heading1 开始，最新日期在顶部，保留该日报原有 heading2/heading3、列表和内联样式。同日同类型只 PATCH 签名变化的块；块数、类型或块级样式变化时，仅替换当天区间，保留其他日期的 IDs 与内容。日卡仍按目的地＋项目＋日期建立身份，同日修订复用 message_id，跨日卡片均指向固定文档。日卡标题与固定文档标题独立。
+
+timeline 同时支持原文字块格式和 [`wa.document.tree.v1` 原生 callout 树](daily-callouts.md)。同色同图标的 callout 保留父块 ID，子块内容按叶子 ID 更新；结构变化只创建和核对受影响的新子树，再删除已确认的工具块。新日期只插入新章节，保留历史树与 IDs。每个 callout 和子块都计入本地上限；未登记的手工块、结构变化或目标日期的人工编辑会停止，不能用平铺快照覆盖。
+
+已有 `per_period` 文档和卡片必须先明确采用，不能通过切换配置自动复制或新建替代文档：
+
+```sh
+python3 -m work_assistant publish adopt-timeline PUBLICATION_ID --confirm --title 'Project Daily Sync'
+python3 -m work_assistant publish REPORT_ID --confirm
+```
+
+adopt 只接受同一目的地、同一项目的 completed 发布，且原文档所有直属块 ID、内容、样式、标题均与已确认快照一致，没有未完成迁移。它建立本地 `doc_binding`，沿用原 document_id/message_id，不创建文档、卡片或额外分享。省略 `--title` 就保留现有文档标题；提供 `--title` 才执行独立预写、PATCH page block 和 GET 核对。adopt 后第一次正式发布会在原日期正文前补入日期 heading1，仍使用同一文档和卡片。其他旧周期的独立文档不会被自动收集、改写或删除。
+
+经过受审查的一次性原生树迁移、并且已保存完整 `publication.document_tree` ack 的文档，需要显式提供已完成的私有手术 journal：
+
+```sh
+python3 -m work_assistant publish adopt-timeline PUBLICATION_ID --confirm --tree-journal /private/path/completed-journal.json --title 'Project Daily Sync'
+```
+
+此入口核对同一文档的 journal、publication ack、冻结报告叶子内容和远端完整树；只读核对通过后，才在本地事务中解除该 publication 的 layout_lock 并记录旧锁和采用来源。未提供 journal 时锁始终生效。原用户 callout 标为 `user-adopted`；原有空文字子块也标为 `user-adopted/preserved`，即使源 renderer 没有该块也会保留。第一次采用不重建 callout；第一次发布只补日期 h1 及明确变化的内容。源数据不能删除、改色或以含糊匹配替换用户容器，也不能覆盖保留块。未知或未完成的手术日志不可采用。该入口仅兼容已确认的私有 surgery ack 格式，不接受模型生成的任意树作为远端证据。
+
+需要单独改固定文档标题时使用返回的 binding_record_id：
+
+```sh
+python3 -m work_assistant publish rename-timeline DOC_BINDING_ID --confirm --title 'Project Daily Sync'
+```
+
+日报发布取得共享文档锁和当日卡片锁，并在锁内重载 binding；独立 rename 只需共享文档锁。写入前读取完整根块 IDs，分页核对目标前缀和当天内容/样式；结构多块、少块、乱序或当前日期被人工编辑时返回 needs_user，卡片也不更新。其他日期的文字编辑、样式或评论不被覆盖，也不会仅因此阻止新日期插入。完整同内容 no-op 不发送任何请求；有待处理的未知文档操作则先要求核对。
+
+`timeline_max_blocks` 是本地保守上限，默认 3000，包含 callout 容器、全部子块、保留的用户节点及结构替换时短暂并存的新旧块；它不是飞书公布的文档容量。达到上限会停止，请自行明确归档或调整本地上限，程序不会自动删历史。平铺文档使用根 children IDs 与分页前缀核对；树形文档分页读取全部 blocks，在稳定 revision 下验证完整父子边、ID 顺序与目标日期签名，不臆造根 ID 数组的分页协议。历史文字和评论保留，但不会被静默更新为以后可覆盖的 ack。
+
+新增块按每批至多 50 个插入（树请求包含父块和子块总数）；callout 至少带一个子块创建，较大的子树先创建有内容的前缀，再分批添加其余子块。写入前持久化 operation、旧/新 IDs、目标快照、索引、UUIDv4 client_token 和 body hash，成功并 GET 整树核对后再确认。插入、删除、同类型 PATCH、分享或改名超时/中断均停止，不会借重新导入、取消或下一天调用盲目重发。先只读核对返回的 doc_binding 或 publication：
+
+```sh
+python3 -m work_assistant reconcile DOC_BINDING_ID
+python3 -m work_assistant reconcile DOC_BINDING_ID --resolution retry_authorized --reason '已人工核对目标日期和全部根 IDs'
+python3 -m work_assistant publish REPORT_ID --confirm --retry
+```
+
+reconcile 只发 GET 并记录显式本地决议，不执行远端写入；它能区分已生效/未生效的插入、删除及改名，只有能完整解释的结构才允许继续，不会丢弃部分插入或把未完成日期标为 completed。改名未生效时，核对后仍须显式 `rename-timeline ... --confirm --retry`；不会由普通日报发布代为改名。创建文档或发送卡片未知且缺少 ID 时，需人工提供已查证的 document_id/message_id，或分别使用精确 `document_absent:true`/`message_absent:true` 与 retry_authorized 确认未生效；分享未知沿用精确 `document_member_granted` 人工确认。上述缺失确认均属人工陈述，不能冒充自动独立验证。
+
+读取校验可发现观察时的编辑，但 `document_revision_id` **不是原子 CAS**，GET 与 DELETE/PATCH 之间仍存在外部并发编辑窗口；操作 token 的去重保留期也不作保证。避免与用户同时编辑目标日期；程序不承诺原子地排除飞书客户端编辑。云端操作和可见样式仍需使用者选择专用目的地实际验收，合成 HTTP 测试不能替代 live 结果。
+
+## 未知结果与恢复
+
+可选的本人飞书私聊／测试群 @ 入口见 [入站 V1](inbound.md) 和 [通用配置](../examples/config.inbound.example.json)。默认禁用，由显式前台命令启动官方 CLI 事件流；DS 快答，复杂问题交 Paseo GPT，只读调查并可用一层 CC/Codex 子任务。此入口不改日报调度，不接受其他发送者或任意群授权；真实接入需使用者自行验收。
+
+```sh
+python3 -m work_assistant reconcile RUN_ID
+python3 -m work_assistant reconcile RUN_ID --resolution failed --reason '已人工检查工作区，准备单独重试'
+python3 -m work_assistant route TASK_ID --no-cache
+python3 -m work_assistant reconcile PUBLICATION_ID
+python3 -m work_assistant reconcile PUBLICATION_ID --resolution retry_authorized --reason '已确认未创建卡片，并检查了文档 ID'
+python3 -m work_assistant publish REPORT_ID --confirm --retry
+```
+
+先读 `task show` 的运行记录或 publish 返回的 publication_id。reconcile 不继续 agent，不补发卡片。写进程已启动但未成功结束，包括部分编辑后的权限拒绝，均进入 unknown；明确没有启动的二进制错误才可直接 failed。Codex 中间命令失败可以由该 turn 恢复，最终 `turn.completed` 成功仍有效；顶层 error/turn.failed 则拒绝。运行 unknown 只允许有理由的 completed/failed/cancelled 人工处理；该完成记录不可代替真实独立 review。中断的 routing 可用 `reconcile TASK_ID` 检查无活进程后恢复为 needs_user，随后显式 route。SIGTERM 会清理所拥有的子进程并保存未知状态；报告只有 OS 锁、整目录原子落盘，被 SIGKILL 后可重新生成，不需要人工解除持久 lease。获取飞书 token 失败发生在写请求之前，记录 failed，可显式 `--retry`；实际发送后的模糊结果仍为 unknown。发布核对读取已知远端 ID 的元信息与内容；缺失 ID 时请人工核对目标端，用 `--remote-ids '{"document_id":"...","message_id":"...","block_ids":["..."]}'` 提供已查到的对应资源，再决定 completed/retry_authorized/cancelled。不要凭没有本地 ID 推断远端没有效果。
+
+文档分享请求结果未知时，reconcile 的文档 GET 不能证明成员权限已生效，也不会额外申请读取成员权限的 scope。必须人工在飞书核对当前配置的用户和权限。确认已授权后使用精确 JSON 布尔值 `true`，保留配置中的成员、权限和目的地一致：
+
+```sh
+python3 -m work_assistant reconcile PUBLICATION_ID --resolution retry_authorized --reason '已人工确认当前配置用户拥有指定文档的 edit 权限' --remote-ids '{"document_member_granted":true}'
+python3 -m work_assistant publish REPORT_ID --confirm --retry
+```
+
+此确认会保存由可信配置计算的成员指纹和 `operator_confirmed` 来源，并审计理由；它是人工确认，不等于独立自动验证。未确认时不能继续或重发未知分享，即使先取消发布也一样。确认后继续剩余发布，后续报告更新不重复授权。仅当整条发布也已人工确认完成时才选 `completed`，必要时同时提供已查到的远端 ID；该路径同样保留成员确认，后续更新不会再次分享。
+
+若人工确认授权未生效，可改用 `--remote-ids '{"document_member_granted":false}'`，仅配合 `retry_authorized` 和非空理由，保持原成员、权限、目的地及已知文档 ID；这会记录 `operator_confirmed_absent` 而非已授权，之后仍须显式 `publish --confirm --retry` 才重发一次授权，不能以 `completed` 或 `cancelled` 绕过。
+
+## 多会话发送普通消息
+
+多个会话可以直接使用同一份配置和 journal，通过 `python3 -m work_assistant.messages` 发送已获授权的定稿文字，无需依赖某个长期在线的主控会话。`chats` 查询机器人可访问的群，`send` 默认 dry-run，`inspect` 只读核对已知消息；完整用法见 [消息命令](messages.md)。
+
+每次逻辑请求使用稳定的 request-id，接力时沿用原 ID、目标和正文。发送回执与读回核验分别记录；结果未知时不换 ID 补发。操作者核实未投递后，可以用显式 `resolve --absent` 记录本地决议，后续新发送仍需用户授权。共享 Skill 负责识别用户意图与目标，命令负责持久化、互斥和回执；出站命令本身不监听聊天；可选的本人入站服务是独立入口，见 [入站 V1](inbound.md)。
+
+日报继续使用文档与摘要卡片的发布流程，不由普通文字命令代替。带两色高亮块的内部数据契约见 [原生高亮块](daily-callouts.md)。
+
+## Paseo 集成与验证范围
+
+不内置调度器，也不修改现有 schedules。除显式启用的入站前台监听外，核心工作流均为一次性命令。把已有 Paseo schedule/agent 的工作目录设为本仓库，运行上述一次性 CLI 即可。例如已有每日流程运行 `python3 -m work_assistant report my-project --date YYYY-MM-DD`，读取报告后以 dry-run 检查；若未配置精确发布 grant，则留待用户显式 publish。给调度 agent 的约束示例：“只运行指定项目 report 命令，回传 report ID/路径；发现 unknown 就回报，不自动 resume/retry，不发外部消息。”写任务由用户先建好并授权，调度 agent 只操作明确给出的 task ID。
+
+自然语言入口可按 [Paseo 一次性调用示例](../examples/paseo-entry.md) 调用 ask。这只是接入现有 agent/schedule 的操作说明，不代表本工具已接管 Paseo 的会话或调度。
+
+离线 unittest 覆盖严格路由、工具调用升级、一次规划失败、意图/授权不扩大、三种事件解析、进程终止/输出上限、并发与 fencing、证据链和更正、确定性导出、HTML/秘密处理、HTTP 200 应用报错、分步 checkpoint、unknown 核对与 create/update/no-op。测试只监听回环地址，不联系真实服务。macOS/Linux 支持本地任务锁；原生 Windows 不受支持（依赖 POSIX fcntl/flock）；WSL2 尚未验收。真实登录、模型账号权限、安装版本差异和飞书权限需要用户在隔离合成工作区自选进行 live 冒烟，不属于离线通过的证明。
+
+更多约束见 [SECURITY.md](../SECURITY.md)、[PLAN.md](../PLAN.md)。
+
+## 已验证的实际链路
+
+2026-10-29 在隔离合成 Git 工作区验证了：DSH 简单任务直接路由 → Codex 实际修改指定文件 → Claude Code 独立只读审查 → 本地 Daily Sync 与证据输出；由主控再次核对文件精确内容。另一个复杂任务实际触发一次 DSH → Codex GPT planner 升级并选出 Claude 执行器，该测试只分类，没有执行假设的架构任务。使用 Claude Code 2.1.303 和 Codex 0.164.0-alpha.11.1，复用本机订阅登录。真实飞书已验证独立应用的文档创建、本人 edit 权限分享、摘要卡片发送与原消息更新，以及相同内容零请求；另完成同文档从普通文本块迁移到原生标题、列表、加粗和可点击链接，并以远端读回及浏览器检查核对。消息 GET 不回显按钮 URL，因此该项只核对了发送请求中的目标；这些结果不替代其他使用者在自己租户内的验收。
