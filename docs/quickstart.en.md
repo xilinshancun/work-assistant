@@ -41,8 +41,8 @@ python3 -m work_assistant doctor --json
 `init` creates `config.local.json` and `.wa/`, both ignored by Git, without replacing an existing config. `doctor` checks local help and protocol capabilities; it neither invokes a model nor tests sign-in. A successful diagnostic returns exit code 0 even when optional components are absent. Inspect `readiness` and `workflows` for availability.
 
 - Demo, records, evidence, reports, and publishing dry-runs need no model CLI.
-- For the first real task, install and sign in to Codex separately. Without DSH, routing escalates once to the Codex planner, then Codex executes.
-- Claude Code can execute tasks and independently review Codex work. Claude alone cannot complete current routing. DSH + Claude supports direct classification but needs Codex for complex escalation.
+- For the first real task, install and sign in to Codex or Claude Code. Select it with `--routing direct --provider codex` or `--routing direct --provider claude_code`; no DSH or separate planner is needed.
+- Default `auto` routing still uses DSH → Codex planner; `--provider` alone does not skip it. DSH + Claude supports classifications that need no escalation; complex escalation needs Codex. Independent review needs both executors.
 
 `local_checks_passed` means local compatibility; `authentication` remains `not tested`. Follow `next_steps` for `incompatible`, `blocked`, or `probe_failed`; do not disable isolation checks to work around a failure. See the [dependency matrix](capabilities.md).
 
@@ -52,7 +52,7 @@ Replace the path with a repository you are authorized to inspect. Start with a n
 
 ```sh
 python3 -m work_assistant project add my-project --workspace /absolute/path/to/project
-python3 -m work_assistant ask my-project 'Read-only: compare the README with the implementation; cite files, issues, and uncertainties' --provider codex
+python3 -m work_assistant ask my-project 'Read-only: compare the README with the implementation; cite files, issues, and uncertainties' --routing direct --provider codex
 ```
 
 This step invokes real models using your CLI's account and service usage. Work Assistant supplies no model account. The executor may send the task and code it reads to your configured model service.
@@ -62,6 +62,8 @@ Save the returned `task_id` and replace `TASK_ID` below:
 ```sh
 python3 -m work_assistant task show TASK_ID
 ```
+
+If you only have Claude Code, replace `--provider codex` with `--provider claude_code`. You can use the [synthetic practice project](../examples/first-task.md) instead of your own repository. Direct mode does not select or switch executors automatically, or add write authority; see [routing modes](routing.md).
 
 `protocol_status=completed` means the provider protocol ended; `goal_status=unverified` means the goal has not been independently checked. Inspect the cited files and results. With both Codex and Claude Code configured, `review TASK_ID` runs a read-only review with the opposite provider.
 

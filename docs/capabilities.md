@@ -21,15 +21,15 @@
 | 你拥有的工具 | 能做什么 | 限定 |
 | --- | --- | --- |
 | 只有 Python | 离线 demo、记录与证据、不可变报告、发布预览 | 不能执行真实模型任务 |
-| Codex | planner + Codex 任务执行 | DSH 可缺省；首次分类失败后升级一次；登录需自行验证 |
-| 只有 Claude Code | 执行器适配器可检测 | 当前 ask 仍需要 DSH 或 Codex 路由，不能独立跑通 |
-| DSH + Claude Code | DSH 直接接受的简单路由、Claude 执行 | 无 Codex 时无法完成复杂/失败分类的 GPT 升级 |
+| 只有 Codex | 显式 direct 执行；也可提供 auto 的 planner + 执行 | auto 中 DSH 可缺省，失败后升级一次；登录需自行验证 |
+| 只有 Claude Code | `--routing direct --provider claude_code` 完成显式任务执行 | 默认 auto 仍不能独立跑通；独立 review 需要 Codex |
+| DSH + Claude Code | 显式 direct；或 DSH 接受且不需升级的 auto 路由 | auto 无 Codex 时无法完成复杂/失败分类的 GPT 升级 |
 | Codex + Claude Code | 两种执行器、相反提供商独立审查 | DSH 可选；审查判断不等于科学复现 |
 | 飞书自建应用 + HTTP 或官方 lark-cli | 原生文档、摘要卡片、journal、回读与恢复 | 需要自己的应用权限和目的地；不提供共享机器人 |
 | 官方 lark-cli + 用户授权 | 显式本人身份发送、本人发送方核验 | 需额外 OAuth scope；user 卡片不支持原位 update-card |
 | DSH / Paseo / lark-cli + 入站配置 | 本人私聊、允许的测试群 @、深度处理、引用答复与收到表情 | 默认关闭、仅本人发送者；详见 [inbound](inbound.md) 的精确依赖与权限 |
 
-`--provider` 固定的是执行器，并不跳过 DSH → Codex planner 路由。`doctor` 的 `workflows` 给出本机可用组合；`local_checks_passed` 不证明已登录、模型可用或服务端权限通过。
+`--routing auto` 是默认值，单独使用 `--provider` 仍不跳过 DSH → Codex planner。显式 `--routing direct` 要求指定执行器，省去分类调用，但不省去授权或执行隔离检查；不会给任务添加 grant。`doctor` 的 `workflows.ask.paths` 分别列出两种方式，Claude-only 显示 `direct_only`，不是 auto 可用。`local_checks_passed` 和 `direct_only` 均不证明已登录、模型可用或服务端权限通过。详见[执行方式](routing.md)。
 
 ## 已实现与仍需验收
 

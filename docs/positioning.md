@@ -32,7 +32,7 @@ Work Assistant 围绕一条流程组织能力：**明确任务 → 复用本机�
 | --- | --- | --- |
 | 无账号也能看到完整结果 | README 的 demo；HTML、Markdown、证据与卡片预览齐全 | 合成输入，不证明真实模型质量 |
 | 安装后离开源码目录仍能运行 | wheel 和 sdist 分别在干净 venv 安装、仓库外运行 demo | 构建工具可能联网；原生 Windows 不支持 |
-| 知道自己缺哪个依赖 | 无 provider、Codex-only、Claude-only、DSH+Claude 的 doctor fixture | 不检测登录；Claude-only 路由仍有限制 |
+| 知道自己缺哪个依赖 | 无 provider、Codex-only、Claude-only、DSH+Claude 的 doctor fixture，区分 auto/direct | 不检测登录；Claude-only 需显式 direct，独立 review 仍需两种执行器 |
 | 知道结论来自哪里、为何改过 | demo 中 12→10 的更正、来源引用和旧报告不可变测试 | 不自动验证科学真实性 |
 | 网络结果不明时不重复投递 | 注入超时/错误，检查持久 intent、GET 核对及 POST 计数 | 同一 journal 内的契约，不宣称跨平台 exactly-once |
 | 别人能参与维护 | 贡献指南、issue/PR 模板、分发检查、平台 CI | Alpha 无长期支持承诺 |
@@ -44,7 +44,7 @@ Work Assistant 围绕一条流程组织能力：**明确任务 → 复用本机�
 下面是待办方向和退出标准，不是已交付承诺，也没有虚构发布日期。
 
 1. **验证外部用户真的能完成第一轮。** 收集至少三个独立安装环境的自愿反馈，记录从 demo、doctor 到首个只读任务/日报的卡点；不要求上传私人记录。只有外部复现支持后，才讨论稳定版。
-2. **减少 provider 接入的特殊知识。** 为新 CLI 版本积累脱敏协议 fixture；评估 Claude-only 的显式路由方案。任何变更都必须保持授权检查，不能为了“开箱即用”绕过隔离或未知状态。
+2. **减少 provider 接入的特殊知识。** 显式 direct 已为 Claude-only/Codex-only 提供单执行器入口；下一步积累新 CLI 版本的脱敏协议 fixture 和独立安装反馈。任何变更都必须保持授权检查，不能为了“开箱即用”绕过隔离或未知状态。
 3. **让现有报告流程更容易接入。** 围绕公开 bundle 契约补充不同采集器的合成示例，要求保留来源限定、更正和哈希；不能只在维护者私有脚本中跑通。
 4. **用公开案例证明持续使用价值。** 做一个从任务、发现、更正到交接的纯合成跨日案例；验收同时包括报告可读性、历史不变和投递不重复。再根据真实需求决定是否需要本地 UI。
 

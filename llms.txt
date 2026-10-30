@@ -2,7 +2,7 @@
 
 > Local-first developer work assistant for Codex and Claude Code users: durable tasks, attributed evidence, corrections, immutable HTML/Markdown reports, and optional explicitly authorized Feishu delivery. MIT; Alpha source version 0.1.0; Python 3.9+ on macOS/Linux.
 
-The Python runtime has no third-party packages. Real tasks require installed and authenticated model CLIs; Codex is the smallest complete routing/execution setup. Claude Code alone does not cover the current routing path. DSH, Feishu and Paseo are optional for the core offline workflow.
+The Python runtime has no third-party packages. Real tasks require installed and authenticated model CLIs. Explicit `ask --routing direct --provider claude_code` or `--provider codex` needs only the selected executor and makes no classifier/planner calls; existing authorization and execution isolation still apply. Default `auto` routing is unchanged: DSH classification can escalate to a Codex planner, and `--provider` alone does not skip classification. Independent review requires both executors. DSH, Feishu and Paseo are optional for the core offline workflow.
 
 Install from a source checkout with `pip install .`, or run `python3 -m work_assistant` there without installation. Distribution name: `local-work-assistant`; import name: `work_assistant`; console command: `wa`. This project has not been published to PyPI as of 2026-10-30. Do not substitute `pip install local-work-assistant`; a same-name registry package does not establish project identity. Native Windows is unsupported; WSL2 is unverified.
 
@@ -16,6 +16,8 @@ This is a curated repository documentation index using the llms.txt proposal. It
 - [中文 README](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/README.md): 同一项目事实与中文入门入口。
 - [English quickstart](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/quickstart.en.md): Source installation, offline demo, first read-only task, reports, and configuration paths.
 - [Evidence map](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/evidence-map.md): Claims mapped to code, regression tests, reproducible commands, and verification limits.
+- [Routing modes](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/routing.md): Explicit single-executor tasks, automatic classification, task history, and recovery boundaries.
+- [First-task practice](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/examples/first-task.md): A synthetic project for an optional real read-only model task; known mismatch and manual acceptance, not a model-quality benchmark.
 - [Capabilities](https://raw.githubusercontent.com/xilinshancun/work-assistant/main/docs/capabilities.md): Supported platforms, optional dependencies, validation scope, and exclusions.
 
 ## Project and maintenance

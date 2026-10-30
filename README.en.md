@@ -47,13 +47,13 @@ Execution, independent review, and business data in this screenshot are all simu
 
 ## Try your own project
 
-Install and sign in to your own Codex CLI first: it is currently the smallest provider setup for a real task. From this repository, replace the workspace path with your project:
+Install and sign in to **either Codex or Claude Code**. The example explicitly selects Codex; for Claude Code, replace `--provider codex` with `--provider claude_code`. From this repository, replace the workspace path with your project:
 
 ```sh
 python3 -m work_assistant init
 python3 -m work_assistant doctor
 python3 -m work_assistant project add my-project --workspace /absolute/path/to/project
-python3 -m work_assistant ask my-project 'Read-only: compare the README with the implementation; cite evidence and open questions' --provider codex
+python3 -m work_assistant ask my-project 'Read-only: compare the README with the implementation; cite evidence and open questions' --routing direct --provider codex
 ```
 
 Tasks default to read-only and never automatically publish. Save the returned `task_id`, substitute it for `TASK_ID`, and replace the date with your archive date:
@@ -65,7 +65,7 @@ python3 -m work_assistant report my-project --date YYYY-MM-DD
 
 The report result's `data.path` points to its directory. The date is an archive period; reports include current tasks and valid claims, not only events from that day. Follow the [quickstart](docs/quickstart.en.md) for installation as `wa`, review, and report output.
 
-Claude Code is an optional executor and independent reviewer. DSH is an optional fast classifier. **Choosing an executor does not bypass routing**: Claude Code alone cannot complete the default task flow; complex routing needs the Codex planner. See [dependencies and validation scope](docs/capabilities.md).
+`--routing direct` uses your explicitly selected executor without a classifier or planner; authorization and execution isolation still apply. Omitting it preserves the original `auto` route: `--provider` alone does not skip classification. Independent `--review` needs the other executor. See [routing modes](docs/routing.md), [dependencies](docs/capabilities.md), or [practice with a synthetic project](examples/first-task.md).
 
 ## Capabilities you can inspect
 
@@ -100,7 +100,7 @@ The evaluator uses temporary synthetic configuration to check the CLI, two indep
 
 ## Boundaries and common questions
 
-- **Does dependency-free mean no model CLI?** No. Demo, evidence, reports, and dry-runs need no model. Real tasks need a CLI combination that covers routing and execution; Codex is the smallest recommended setup.
+- **Does dependency-free mean no model CLI?** No. Demo, evidence, reports, and dry-runs need no model. Explicit direct tasks need authenticated Codex or Claude Code; automatic routing has additional planner requirements.
 - **Does all data stay on the machine?** Storage is local by default; real model and Feishu requests leave the machine. Local-first does not mean offline inference.
 - **How far does non-replay extend?** It is a recovery contract within the same configuration and shared journal, not cross-machine exactly-once delivery. Database copies do not share locks.
 - **What does `verified` prove?** Receipts state the checks performed. Message readback does not prove business truth or that a recipient read it; default card readback does not fully verify URLs and styles.

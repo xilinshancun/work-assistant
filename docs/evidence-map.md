@@ -65,6 +65,8 @@ python3 -m unittest discover -s tests -p 'test_evidence_reports.py' -v
 | Message POST uncertainty is preserved | [messages.py](../work_assistant/messages.py) | [test_messages.py](../tests/test_messages.py): `test_post_api_error_and_interrupt_are_unknown_without_guessing_error_text` | Injected errors retain unknown and do not trigger automatic resending |
 | Readback and sending are distinct | [messages.py](../work_assistant/messages.py) | [test_messages.py](../tests/test_messages.py): `test_readback_failures_keep_sent_id_never_resend_and_inspect_can_finish` | An acknowledged message can remain unverified; inspection does not resend it |
 | Doctor does not imply model access | [config.py](../work_assistant/config.py) | [test_onboarding.py](../tests/test_onboarding.py): `test_valid_local_capabilities_never_claim_authenticated_or_live_ready` | Local interface compatibility is separate from authentication and live readiness |
+| Explicit direct tasks need only their chosen executor | [routing.py](../work_assistant/routing.py), [assistant.py](../work_assistant/assistant.py) | [test_direct_routing.py](../tests/test_direct_routing.py): `test_each_direct_executor_runs_once_without_any_classifier_or_planner`, `test_direct_write_keeps_intent_and_partial_failed_write_becomes_unknown` | Zero classifier/planner calls in fixtures; the existing executor and unknown-outcome path still apply, not live account validation |
+| Switching modes does not reuse a stale accepted route | [routing.py](../work_assistant/routing.py) | [test_direct_routing.py](../tests/test_direct_routing.py): `test_auto_cache_legacy_auto_and_cross_mode_switch_use_latest_accepted_route` | Auto cache hits match the runner's current accepted route, including compatibility with old auto records |
 | Write authorization and report delivery are separate | [policy.py](../work_assistant/policy.py), [feishu.py](../work_assistant/feishu.py) | [test_policy.py](../tests/test_policy.py), [test_feishu.py](../tests/test_feishu.py) | A coding executor's write grant does not authorize publishing |
 
 ## Run the relevant layer
@@ -75,6 +77,7 @@ python3 -m unittest discover -s tests -p 'test_evidence_reports.py' -v
 | Do evidence and corrections retain their meaning? | `python3 -m unittest discover -s tests -p 'test_evidence_reports.py' -v` |
 | Does an unknown send avoid automatic replay? | `python3 -m unittest discover -s tests -p 'test_messages.py' -v` |
 | Are task authorization checks covered? | `python3 -m unittest discover -s tests -p 'test_policy.py' -v` |
+| Does explicit single-executor routing preserve authorization and recovery? | `python3 -m unittest discover -s tests -p 'test_direct_routing.py' -v` |
 | Does the installed package work outside the checkout? | Build and run the [distribution procedure](releasing.md); it installs wheel and sdist in separate venvs |
 | Does the entire offline regression suite pass? | `python3 -m unittest discover -s tests -v` |
 

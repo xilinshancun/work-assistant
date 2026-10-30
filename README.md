@@ -47,13 +47,13 @@ python3 -m work_assistant demo --output out/demo
 
 ## 用到自己的项目
 
-先安装并登录自己的 Codex CLI；这是当前最少的真实任务依赖。以下命令在 Work Assistant 仓库内执行，把路径替换为自己的项目：
+先安装并登录 **Codex 或 Claude Code 中的一种**。下面显式选择 Codex；使用 Claude Code 时，将 `--provider codex` 换成 `--provider claude_code`。在 Work Assistant 仓库内执行，把路径替换为自己的项目：
 
 ```sh
 python3 -m work_assistant init
 python3 -m work_assistant doctor
 python3 -m work_assistant project add my-project --workspace /absolute/path/to/project
-python3 -m work_assistant ask my-project '只读检查 README 与实现是否一致，列出证据和待确认项' --provider codex
+python3 -m work_assistant ask my-project '只读检查 README 与实现是否一致，列出证据和待确认项' --routing direct --provider codex
 ```
 
 默认只读，不自动发消息。保存 `ask` 返回的 `task_id`，将下方 `TASK_ID` 换为它，将日期换为实际归档日期：
@@ -65,7 +65,7 @@ python3 -m work_assistant report my-project --date YYYY-MM-DD
 
 `report` 输出的 `data.path` 指向报告目录。日期是归档周期，报告包含当前任务与有效结论，并非只筛选当天事件。完整步骤见[上手指南](docs/quickstart.md)，也支持[安装为 `wa` 命令](docs/quickstart.md#安装为-wa-命令)。
 
-Claude Code 可作执行器与独立审查者；DSH 可作快速分类器。**指定执行器不会跳过路由**：Claude-only 暂不能独立完成默认任务流程，复杂路由依赖 Codex planner。[依赖与验证范围](docs/capabilities.md)
+`--routing direct` 使用你明确选择的执行器，不调用分类器或 planner；任务仍经过授权与执行隔离检查。不带此选项时仍走原来的 `auto` 路由，单独指定 `--provider` 不会跳过分类。独立 `--review` 需要另一种执行器。[执行方式](docs/routing.md) · [依赖范围](docs/capabilities.md) · [用合成小项目练习](examples/first-task.md)
 
 ## 核心能力与核验入口
 
@@ -100,7 +100,7 @@ python3 scripts/evaluate.py --output out/evaluation
 
 ## 边界与常见问题
 
-- **零依赖是否等于不用模型 CLI？** 不是。只有 demo、证据、报告和 dry-run 不需要模型；真实任务至少需要能覆盖路由与执行的 CLI 组合，最少推荐 Codex。
+- **零依赖是否等于不用模型 CLI？** 不是。demo、证据、报告和 dry-run 不需要模型；显式 direct 任务需要已登录的 Codex 或 Claude Code。自动路由另有 planner 依赖。
 - **数据是不是全程不出本机？** 本地存储是默认；真实模型和飞书调用仍会离开本机。不要把 local-first 当成离线推理。
 - **“不重放”保证到哪里？** 同一配置和共享 journal 内的恢复契约；不是跨机器 exactly-once。复制数据库不能提供跨副本互斥。
 - **`verified` 是什么？** 具体检查范围写在回执里。消息回读不证明业务事实正确或对方已读；默认卡片回读不完整核验 URL 和样式。

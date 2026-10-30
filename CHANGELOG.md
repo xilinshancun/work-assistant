@@ -11,6 +11,11 @@ or production support.
 
 ### Available in source
 
+- Opt-in `--routing direct` for an explicitly selected Claude Code or Codex
+  executor, without classification/planning calls. Default automatic routing,
+  execution authorization and unknown-outcome handling remain in effect.
+- Mode-aware route caching and doctor guidance, plus a synthetic first-task
+  practice project with an intentional documentation/implementation mismatch.
 - Local project/task records, explicit read/write grants, two-stage provider
   routing and subprocess execution through installed CLIs.
 - Durable evidence/claim history, immutable report artifacts and a deterministic

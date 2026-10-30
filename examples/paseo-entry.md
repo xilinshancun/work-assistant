@@ -9,7 +9,7 @@ Paseo 是可选入口；本工具不会安装或修改它，也不会接管其�
 手动调用等价于：
 
 ```sh
-python3 -m work_assistant ask my-project '只读检查现有实现，并列出有来源的结论' --provider codex
+python3 -m work_assistant ask my-project '只读检查现有实现，并列出有来源的结论' --routing direct --provider codex
 ```
 
 带独立审查与本地报告的可选调用：

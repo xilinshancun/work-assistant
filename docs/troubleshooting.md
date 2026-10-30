@@ -20,6 +20,10 @@ python3 -m work_assistant --config config.local.json doctor --json
 
 Doctor 不调用模型。正常输出 JSON 的退出码是 0；它是诊断，不是自动部署的健康门槛。查看 `workflows.ask.paths` 与 `gpt_fallback`，不要要求所有可选 provider/飞书都就绪。没有模型 CLI 时，`workflows.offline` 仍然可用。
 
+`workflows.ask.readiness=direct_only` 表示只有显式 direct 路径通过本地检查。使用 `paths[].task_option` 中的完整参数；不要把它解释为默认 auto 或账号认证通过。
+
+`auto_readiness` 单独描述自动路径。保留的旧值 `limited_direct_route` 指 DSH 接受分类但没有 Codex 升级可用，与新选项 `--routing direct` 不同；按 `paths[].mode` 和完整 `task_option` 判断。
+
 ## 常见症状
 
 | 症状 | 下一步 |
@@ -27,7 +31,10 @@ Doctor 不调用模型。正常输出 JSON 的退出码是 0；它是诊断，�
 | `No module named work_assistant` | 源码模式进入仓库根目录；或在 venv 安装后使用该环境的 `wa`。别依赖另一个目录的 PYTHONPATH |
 | `wa: command not found` | 用 `.venv/bin/wa`，或激活安装它的 venv |
 | 换目录后看不到原任务 | 明确使用同一个 `--config /absolute/path/config.local.json`；状态默认跟随配置位置 |
-| 缺 DSH | Codex 可承担一次 planner 升级；只有 Claude 时还没有完整默认路由 |
+| 只有 Claude Code，默认 ask 路由失败 | 新任务显式使用 `--routing direct --provider claude_code`；已有任务的处理见[执行方式](routing.md)，不要反复 ask |
+| 缺 DSH | auto 可升级一次到 Codex planner；显式 direct 无需 DSH 或 planner |
+| direct 提示缺少 provider | ask 必须带 `--provider`；route 使用原任务创建时保存的 provider，不在路由时改换执行器 |
+| 单执行器加 `--review` 失败 | review 需要相反提供商；保留原任务，先检查执行结果，配置另一执行器后再明确 review |
 | 已登录但任务仍失败 | Doctor 不验登录；核对提供商自身账号、配置和返回错误。不要导出凭证到 issue |
 | demo 输出目录不完整 | 换新的输出目录保留原现场；完整目录重复执行会返回旧结果 |
 | 报告出现 `goal unverified` | 正常边界：执行协议完成不证明目标实现。查看实际产物，必要时做独立 review |

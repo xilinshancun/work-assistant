@@ -18,6 +18,7 @@
 | 工作流 | 文档 |
 | --- | --- |
 | 任务、路由、审查、证据、更正 | [详细操作参考](guide.md) |
+| 只装一种编码 CLI；选择 direct 或 auto | [执行方式 / Routing](routing.md)、[合成项目练习](../examples/first-task.md) |
 | 从已有 HTML/evidence 导入日报 | [导入契约](guide.md#导入已有的本地日报)、[合成示例](../examples/daily-bundle) |
 | 飞书配置与发布 | [发布参考](guide.md#飞书预览和真实发布) |
 | request-id、文字/卡片、本人身份、引用回复、恢复 | [消息命令](messages.md) |

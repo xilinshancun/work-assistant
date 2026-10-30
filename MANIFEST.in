@@ -6,6 +6,8 @@ include examples/config.timeline.example.json
 include examples/config.inbound.example.json
 include examples/sample-observation.json
 include examples/paseo-entry.md
+include examples/first-task.md
+include examples/first-project/README.md examples/first-project/count_records.py examples/first-project/records.txt
 include examples/daily-bundle/state.json
 include examples/daily-bundle/daily/2026-01-15.html
 include examples/daily-bundle/evidence/daily-2026-01-15.json

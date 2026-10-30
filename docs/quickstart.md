@@ -41,8 +41,8 @@ python3 -m work_assistant doctor --json
 `init` 创建本地 `config.local.json` 和 `.wa/`，不会覆盖已有配置。两者均已被 Git 忽略。`doctor` 检查本地 CLI 的 help/协议能力，不调用模型、不测试账号登录。JSON 输出成功时退出码为 0，即使某些可选功能未配置；判断能力应读取 `readiness` 和 `workflows`。
 
 - **只想看 demo、管理证据或生成报告**：不需要任何模型 CLI。
-- **第一次真实任务**：建议已安装并登录 Codex。没有 DSH 时，会升级一次到 Codex planner，再由 Codex 执行。
-- **使用 Claude Code 执行或独立审查**：再配置 Claude Code。只有 Claude Code 而没有 DSH/Codex 不能完成当前路由；DSH + Claude 仅有直接分类路径，复杂升级仍需要 Codex。
+- **第一次真实任务**：安装并登录 Codex 或 Claude Code，使用 `--routing direct --provider codex` 或 `--routing direct --provider claude_code` 明确选择执行器，不需要 DSH 或额外 planner。
+- **自动分类与独立审查**：默认 `auto` 仍走 DSH → Codex planner，单独指定 `--provider` 不跳过它。DSH + Claude 的 auto 仅支持不需升级的分类；复杂升级需要 Codex。独立审查需要两种执行器。
 
 `local_checks_passed` 只表示本地接口兼容，认证仍是 `not tested`。`incompatible`、`blocked` 或 `probe_failed` 请按 `next_steps` 处理；不要通过关闭隔离检查来绕过失败。完整组合见[能力表](capabilities.md)。
 
@@ -52,7 +52,7 @@ python3 -m work_assistant doctor --json
 
 ```sh
 python3 -m work_assistant project add my-project --workspace /absolute/path/to/project
-python3 -m work_assistant ask my-project '只读检查 README 与实现是否一致；列出文件依据、问题和无法确认的部分' --provider codex
+python3 -m work_assistant ask my-project '只读检查 README 与实现是否一致；列出文件依据、问题和无法确认的部分' --routing direct --provider codex
 ```
 
 这是会调用真实模型的步骤，使用你自己的 CLI 登录及其服务用量。Work Assistant 不提供模型账号。执行器可能把任务和读取到的代码交给所配置的模型服务。
@@ -62,6 +62,8 @@ python3 -m work_assistant ask my-project '只读检查 README 与实现是否一
 ```sh
 python3 -m work_assistant task show TASK_ID
 ```
+
+只有 Claude Code 时，把命令中的 `--provider codex` 换成 `--provider claude_code`。不想使用自己的项目，可以先做[合成小项目练习](../examples/first-task.md)。direct 不会自动挑选或切换执行器，也不添加写权限；详见[两种执行方式](routing.md)。
 
 `protocol_status=completed` 表示提供商协议结束，`goal_status=unverified` 表示目标尚未独立核验。查看实际文件依据和结果后，再决定是否需要独立审查。已配置 Codex 和 Claude Code 时，可运行 `review TASK_ID`，由相反提供商只读检查。
 

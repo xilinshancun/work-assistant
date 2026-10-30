@@ -34,7 +34,7 @@ python3 -m venv .venv
 
 安装过程需要 setuptools 构建工具；安装后的运行时仍无第三方依赖。开发者可改用 `pip install -e .`。源码路径在断网机器可直接运行，安装路径是否需联网取决于本机已有构建工具。
 
-提供商均通过已有本机 CLI 选择使用，demo、证据、报告、dry-run 均不需要安装任何模型 CLI。DSH 可选：缺失/不可运行时记录原因并升级到 Codex GPT planner；要在没有 DSH 时使用真实 route，需要已安装并登录的 Codex。Claude 是可选执行器；只安装 Codex 时可固定任务 `--provider codex` 执行，但独立的相反提供商 review 需要 Claude。DSH+Claude 可处理直接路由给 Claude 的任务；需要 GPT 升级而 Codex 不可用时会诚实进入 needs_user。Paseo 完全可选，不是 Python 包依赖，也不需要其 CLI。
+提供商均通过已有本机 CLI 选择使用，demo、证据、报告、dry-run 均不需要安装任何模型 CLI。显式 `--routing direct --provider codex|claude_code` 只需要选中的已登录执行器，不调用分类器或 planner。默认 auto 中 DSH 可选：缺失/不可运行时记录原因并升级到 Codex GPT planner；DSH+Claude 可处理不需升级的自动分类，需要 GPT 升级而 Codex 不可用时进入 needs_user。独立的相反提供商 review 需要 Codex 和 Claude 两者。Paseo 完全可选，不是 Python 包依赖，也不需要其 CLI。
 
 ## 配置和任务
 
@@ -43,10 +43,10 @@ python3 -m venv .venv
 ```sh
 python3 -m work_assistant init
 python3 -m work_assistant project add my-project --workspace .
-python3 -m work_assistant ask my-project '只读检查 README 与当前实现的一致性' --provider codex
+python3 -m work_assistant ask my-project '只读检查 README 与当前实现的一致性' --routing direct --provider codex
 ```
 
-`ask PROJECT GOAL` 创建一个新任务，复用 task → route → run；输出始终包含已创建的 task_id，遇到 failed/unknown/needs_user 就停止，后续可用 `task show`、`reconcile` 或显式 `run --followup` 继续处理。不会自动发布。需要独立审查时加 `--review`，需要报告时加 `--report-date 2026-01-15`；它们都是可选步骤，前面的步骤不成功就不继续。写入必须显式给出 `--intent write_workspace`，且项目已有对应 grant，ask 不会创建授权。每次 ask 是一次新的用户动作，不会自动重放先前未知运行。
+`ask PROJECT GOAL` 创建一个新任务，复用 task → route → run；有效请求在创建任务后保留 task_id，遇到 failed/unknown/needs_user 就停止，后续可用 `task show`、`reconcile` 或显式 `run --followup` 继续处理。direct 缺少 provider 的无效参数会在创建任务前拒绝。不会自动发布。需要独立审查时加 `--review`，需要报告时加 `--report-date 2026-01-15`；它们都是可选步骤，前面的步骤不成功就不继续。写入必须显式给出 `--intent write_workspace`，且项目已有对应 grant，ask 不会创建授权。每次 ask 是一次新的用户动作，不会自动重放先前未知运行。
 
 例如完整只读旅程：
 
@@ -75,7 +75,9 @@ python3 -m work_assistant task show TASK_ID
 python3 -m work_assistant run TASK_ID --followup '再检查刚才结果中的一个具体问题'
 ```
 
-把 `TASK_ID` 替换为实际 ID。`route` 仅分类，DSH 超时、报错、低置信度、复杂任务、无效 JSON 或调用工具时最多升级一次到 Codex planner；planner 失败进入 needs_user。有效 planner 可执行复杂任务，不能扩大用户授权。默认执行器建议架构/审查交 Claude、实现交 Codex。任务可用 `--provider codex|claude_code` 固定执行器，也仍受项目 grants 约束。
+把 `TASK_ID` 替换为实际 ID。默认 `route --routing auto` 仅分类，DSH 超时、报错、低置信度、复杂任务、无效 JSON 或调用工具时最多升级一次到 Codex planner；planner 失败进入 needs_user。有效 planner 可执行复杂任务，不能扩大用户授权。默认执行器建议架构/审查交 Claude、实现交 Codex。任务可用 `--provider codex|claude_code` 固定执行器，但单独指定它不会跳过 auto 分类。
+
+`route TASK_ID --routing direct` 则按原任务保存的 provider 建立明确的用户路由，零分类调用；任务必须在创建时指定 provider，且同样符合 intent/grants。它不运行任务，后续 `run` 仍是单独动作。模式保存在本次 route 历史中，不永久改变 task 默认值；`task show` 可核对 `mode`、`basis` 与来源。两种方式都不能绕过 unknown 或运行中的状态，详见[执行方式](routing.md)。
 
 要授权一个独立可写项目，创建时显式给出两个 grant，任务也要声明写 intent：
 
@@ -88,7 +90,7 @@ python3 -m work_assistant task add writable-project '在工作区添加合成示
 
 `protocol_status=completed` 仅说明提供商协议成功结束；`goal_status=unverified` 表示用户目标尚未独立核验。task 的 completed 是执行阶段状态，模型可能只报告“无法读取文件”，仍必须核查实际产物/运行 review，不能据此声称目标已实现。报告会明确显示 `protocol completed; goal unverified`。review 未通过返回 2；SIGTERM 返回 143。Claude 写任务仅允许 Read/Glob/Grep/Edit/Write，不开放 Bash。两个可写项目不能注册相同或互为祖先的工作区。
 
-配置默认 `config.local.json`，状态默认 `.wa/`，均被忽略。`--config PATH` 放在子命令之前。所有配置相对路径以配置文件所在目录为基准，支持 `~`；`project --workspace` 同样遵循该规则。证据命令中的源路径相对当前工作目录。参考 [合成配置](../examples/config.example.json)。可配置每个提供商的 argv 数组、env、timeout、model，Codex 的 planner_effort/executor effort；不拼 shell，不自动切账号。显式本地 `CODEX_HOME` 可绑定已登录账号，仓库不包含个人路径或账号设置。
+配置默认 `config.local.json`，状态默认 `.wa/`，均被忽略。`--config PATH` 放在子命令之前，其相对路径按当前工作目录解析。配置内容中的相对路径以配置文件所在目录为基准，支持 `~`；`project --workspace` 同样遵循配置目录规则。证据命令中的源路径相对当前工作目录。参考 [合成配置](../examples/config.example.json)。可配置每个提供商的 argv 数组、env、timeout、model，Codex 的 planner_effort/executor effort；不拼 shell，不自动切账号。显式本地 `CODEX_HOME` 可绑定已登录账号，仓库不包含个人路径或账号设置。
 
 `doctor` 检测安装与本机 help 能力，不测试登录、不消费模型。macOS 自动发现标准 Applications 下的 DSH。实际协议为 DSH headless JSON、CC print JSON、Codex exec JSONL；实现依据本机 help，详见 [设计规范](../PLAN.md)。DSH 分类设置 `DSH_PERMISSION_MODE=read-only`，没有向旧版本传不存在的权限 flags。classifier/planner 使用临时空工作目录，仅接收任务分类输入；真实项目路径只交给执行器。具体登录/profile overlay 由本机用户维护，不打印完整配置。安装版 DSH 0.2.1-rc.3 源码确认 session 的 `sessionId`、`status.phase=turn_end` 的 `reason.kind=completed` 和最后 `final.text`；三者中终态成功、非空 final 与 exit 0 缺一即拒绝，失败/截断状态不可忽略。成功 fixture 来自安装包协议源码；已于 2026-10-29 在 macOS 的 DSH 0.2.1-rc.3 桌面账号登录下完成真实路由验证。其他安装环境仍需自行检查认证与版本兼容性。
 

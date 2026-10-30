@@ -31,6 +31,13 @@ Flat modules are acceptable for readability; avoid overengineering. Suggested: c
 
 ## Routing and policy contract (independent implementation target)
 
+The two-stage classification below describes the default `auto` mode. An explicit
+`ask --routing direct --provider codex|claude_code` can instead record the user's
+executor selection without classification. It retains the same task grants,
+executor policy, locking and unknown-outcome rules. Direct is an action property
+stored on the route, not a permanent task preference or a model confidence claim;
+see `docs/routing.md` for the current interface and recovery boundaries.
+
 Public pure functions in `work_assistant/policy.py`:
 
 ```

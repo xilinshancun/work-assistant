@@ -58,7 +58,8 @@ The sdist is also unpacked into a fresh temporary directory and its own
 `scripts/evaluate.py` is run there. Its receipt must pass and match stdout;
 `sdist-evaluation/receipt.json` and its synthetic artifacts remain in the smoke
 output. This checks source-distribution completeness separately from installed
-wheel/sdist behavior.
+wheel/sdist behavior. The unpacked first-project line counter must also reproduce
+its documented count of five, without a model call.
 
 Build preparation can download tools from the package index. For installation
 checks without tool downloads, prepare compatible wheels using the same Python

@@ -26,7 +26,9 @@ REPORT_FILES = {'index.html', 'daily-sync.md', 'evidence.html', 'evidence.json',
 SOURCE_FILES = {'README.md', 'LICENSE', 'SECURITY.md', 'pyproject.toml', 'MANIFEST.in',
                 'README.en.md', 'docs/README.md', 'docs/quickstart.md', 'docs/quickstart.en.md',
                 'docs/capabilities.md', 'docs/positioning.md', 'docs/troubleshooting.md',
-                'docs/guide.md', 'docs/assets/demo-report.png', 'docs/evidence-map.md', 'llms.txt',
+                'docs/guide.md', 'docs/assets/demo-report.png', 'docs/evidence-map.md', 'docs/routing.md', 'llms.txt',
+                'examples/first-task.md', 'examples/first-project/README.md',
+                'examples/first-project/count_records.py', 'examples/first-project/records.txt',
                 'CONTRIBUTING.md', 'CHANGELOG.md', 'docs/releasing.md',
                 'scripts/package_smoke.py', 'scripts/evaluate.py', 'examples/daily-bundle/state.json',
                 'examples/daily-bundle/daily/2026-01-15.html',
@@ -187,6 +189,11 @@ def smoke(artifacts, output, build_wheelhouse=None):
                 saved = json.loads((output / 'sdist-evaluation/receipt.json').read_text(encoding='utf-8'))
                 check(saved == evaluation, 'saved source evaluation differs from stdout')
                 result['source_evaluation'] = {'status': evaluation['status'], 'summary': evaluation['summary']}
+                first_project = source / 'examples/first-project'
+                count = run([python, '-I', first_project / 'count_records.py', first_project / 'records.txt'],
+                            cwd, 'sdist-first-project')
+                check(count.strip() == '5', 'unpacked practice fixture no longer reproduces its documented mismatch')
+                result['first_project_count'] = 5
     receipt = {'status': 'passed', 'scope': 'synthetic offline runtime; no model/Feishu calls; build tools may download',
                'artifacts': results}
     (output / 'receipt.json').write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
