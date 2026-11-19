@@ -413,6 +413,7 @@ class VisibleReport(HTMLParser):
             check_outside(self.tree)
         result, summary_parts, summary_elements = [], [], []
         targets, block_count = [result], 1  # Include the generated coverage block.
+        table_headers = []
         inline_tags = {"strong", "b", "em", "i", "span", "a", "code", "s", "small", "u", "br", "wbr",
                        "mark", "time", "abbr", "kbd", "del", "ins", "label", "var", "samp", "cite", "dfn", "bdi", "bdo"}
         containers = {"main", "section", "article", "header", "footer", "div", "ul", "ol", "li", "dl", "dt", "dd",
@@ -457,7 +458,7 @@ class VisibleReport(HTMLParser):
                         runs.append(("; ", {}))
                     previous_block = child_block
                 runs.extend(child_runs)
-            return ([(" | ", {})] if tag in {"td", "th"} else []) + runs
+            return runs
 
         def append_block(block):
             nonlocal block_count
@@ -495,6 +496,13 @@ class VisibleReport(HTMLParser):
         def walk(node, in_summary=False, inherited_kind="text"):
             if node["hidden"] or node["title"]:
                 return
+            if node["tag"] == "table":
+                table_headers.append([])
+                try:
+                    walk_content(node, in_summary, inherited_kind)
+                finally:
+                    table_headers.pop()
+                return
             if "callout_tone" in node:
                 if len(targets) > 1:
                     raise ValueError("nested callouts are unsupported; maximum one callout layer")
@@ -520,6 +528,31 @@ class VisibleReport(HTMLParser):
                     raise ValueError("unsupported callout child type: hr")
                 return
             in_summary = in_summary or node["summary"]
+            if tag == "tr":
+                cells = []
+                for child in node["children"]:
+                    if type(child) is str and not child.strip():
+                        continue
+                    if type(child) is not dict or child["tag"] not in {"td", "th"}:
+                        raise ValueError("table row must contain cells")
+                    cells.append(child)
+                headers = table_headers[-1] if table_headers else []
+                header_row = bool(cells) and all(c["tag"] == "th" for c in cells)
+                if header_row and table_headers:
+                    table_headers[-1] = [inline(c) for c in cells]
+                runs = []
+                for index, cell in enumerate(cells):
+                    content = inline(cell)
+                    if not any(t.strip() for t, _ in content):
+                        continue
+                    if runs:
+                        runs.append((" · " if header_row else "\n", {}))
+                    if not header_row and len(headers) == len(cells) and headers[index]:
+                        runs.extend(headers[index])
+                        runs.append(("：", {}))
+                    runs.extend(content)
+                emit("text" if header_row else "bullet", runs, in_summary)
+                return
             if tag in leaf_blocks:
                 kind = ("heading" + tag[1:] if tag.startswith("h") else
                         "heading2" if tag == "summary" else inherited_kind)

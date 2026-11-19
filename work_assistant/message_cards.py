@@ -73,7 +73,7 @@ def parse_card(raw):
 
 
 def matches_card_projection(card, content):
-    """Match exact readable rows, permitting the observed plain-text note flattening."""
+    """Match exact readable rows, allowing Markdown text runs and flattened notes."""
     expected = card_projection(card)
     if (type(content) is not dict or set(content) != {"title", "elements"}
             or content["title"] != expected["title"] or type(content["elements"]) is not list
@@ -81,6 +81,15 @@ def matches_card_projection(card, content):
         return False
     for source, row, actual in zip(card["elements"], expected["elements"], content["elements"]):
         if actual == row:
+            continue
+        # GET can split a Markdown paragraph at formatting boundaries. Only
+        # concatenate text runs inside that same row; preserve every character.
+        if (source["tag"] == "div" and source["text"]["tag"] == "lark_md"
+                and type(actual) is list and actual
+                and all(type(run) is dict and set(run) == {"tag", "text"}
+                        and run["tag"] == "text" and type(run["text"]) is str
+                        for run in actual)
+                and "".join(run["text"] for run in actual) == row[0]["text"]):
             continue
         # A note's plain_text elements may be returned as a row of text objects,
         # without the note wrapper. Keep every text and its original row/order.

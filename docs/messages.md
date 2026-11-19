@@ -66,7 +66,7 @@ GET 中的 main/thread，`placement_matches_request` 单独表示是否一致。
 
 request-id 在共享 journal 内全局绑定原始目标类型／ID 和精确内容哈希，不按项目、日期或 worker 分开。相同 request-id 改目标或正文会拒绝；相同请求已完成则返回原 action_id、message_id 和核验结果，零发送请求。每个动作在任何发送之前生成并保存一个稳定 UUID（36 字符）、模式 0600 的原文字节副本及目标／内容哈希。不会把模型输出字段当成授权。
 
-发送在 request 锁及相同目标／内容的锁内执行：先认证，再持久写入 `sending`，最后才 POST。POST 阶段的所有 APIError、超时、断连、损坏响应、缺 message_id 或进程中断均保守记为 `outcome_unknown`。公共 adapter 的 APIError 没有结构化的“未生效”保证，因此不解析错误字符串猜测状态码或声称消息明确未发送。重启看见残留 `sending` 只恢复成 unknown，不重发。认证失败且尚未进入 sending 时仍为 `failed`／`not_sent`，因为消息 POST 尚未开始。没有 retry 命令：同一个 failed 请求也不会因重复 confirm 自动重试。
+发送在 request 锁及相同目标／内容的锁内执行：先认证，再持久写入 `sending`，最后才 POST。POST 阶段的所有 APIError、超时、断连、损坏响应、缺 message_id 或进程中断均保守记为 `outcome_unknown`。公共 adapter 的 APIError 没有结构化的“未生效”保证，因此不解析错误字符串猜测状态码或声称消息明确未发送。重启看见残留 `sending` 只恢复成 unknown，不重发。认证失败且尚未进入 sending 时仍为 `failed`／`not_sent`，因为消息 POST 尚未开始。普通重复 confirm 仍不重试。仅对明确从未进入发送阶段的认证失败，可显式使用下述恢复入口。
 
 不同 request-id 若目标和内容与已有 preparing／sending／unknown／verification_pending 动作一致，会被阻止，以免自动替换 ID 绕过未知状态。不同内容的新用户请求不能代替对原 unknown 的处理；Skill 必须持续沿用原逻辑请求 ID。用户对一个**已明确未发送的失败**作新授权时，由原始会话单独处理新的逻辑请求，工具不会自动建立它。
 
@@ -272,3 +272,10 @@ Imported daily cards can use a trusted `publisher.card_signature` string (up to
 participates in the report hash, and does not change the document. Omit it to
 retain the default project and cutoff footer. Personal signatures belong only
 in private local configuration.
+
+
+### 显式恢复发送前的认证失败
+
+`send` 的原请求参数增加 `--retry-preflight --reason "操作者核查依据"`，先 dry-run，再 confirm。此入口仅接受原 action 的 `failed/not_sent`，且错误精确为 `authentication_failed_before_send; no message request started`、message_id 为空、未 ACK、expected_sender_app_id 为空；回复、更新、已决议记录及任何未知状态均拒绝。原身份、目标、内容、私有源文件和 UUID 必须一致。已 completed 的请求仍返回 no-op。
+
+预览不联网、不写恢复审计。confirm 在原请求与目标内容双锁内重新核对，先原子保存完整失败状态、操作者 reason 与恢复意图，再走原认证和发送前意图记录，最多发起一次消息 POST。原 action/request-id/UUID 不变；保留历史失败审计，不清除 journal，不创建替代动作。若认证再次失败，仍记 failed/not_sent；若已进入 sending 后超时或崩溃，仍须 inspect，不能再通过本入口重发。该能力不授权自动恢复、改稿或新目标发送。

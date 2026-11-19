@@ -47,6 +47,7 @@ class TreeServer:
                             if b['block_type'] in TEXT_BLOCKS:
                                 native=b[TEXT_BLOCKS[b['block_type']]];native.setdefault('style',{}).update(align=1,folded=False)
                                 for e in native['elements']:
+                                    if 'text_run' not in e: continue
                                     s=e['text_run'].setdefault('text_element_style',{})
                                     for k in ('bold','italic','underline','strikethrough','inline_code'):s.setdefault(k,False)
                             elif b['block_type']==19:b['callout'].setdefault('text_color',0)
@@ -138,6 +139,146 @@ class TreeTimelineTests(Base):
     def writes(self,start=0):return [c for c in self.server.calls[start:] if c[0] in {'POST','PATCH','DELETE'} and '/tenant_access_token/' not in c[1]]
     def binding(self):return self.s.records('doc_binding')[0]
     def assertCompleted(self,result):self.assertEqual(result['status'],'completed',result.get('error',result))
+
+    def unstarted_unknown(self, day='2026-01-30'):
+        self.assertCompleted(self.document_only(self.report('2026-01-29')))
+        report = self.report(day)
+        with patch('work_assistant.timeline_tree.TreeDocument.start_section', side_effect=AmbiguousError('synthetic pre-write interruption')):
+            result = self.document_only(report)
+        self.assertEqual(result['status'], 'outcome_unknown')
+        self.assertEqual(self.s.get(result['publication_id'])['data']['steps'], [])
+        self.assertIsNone(self.binding()['data'].get('operation'))
+        return report, result
+
+    def append_history_nodes(self):
+        parent = next(bid for bid,b in self.server.nodes.items() if b['block_type']==19)
+        bullet = self.server.add(block(12, 'Synthetic manual links'), parent)
+        self.server.nodes[parent]['children'].append(bullet)
+        tail = self.server.add(block(2, ''), self.server.root)
+        self.server.nodes[self.server.root]['children'].append(tail)
+        self.server.revision += 1
+        return bullet, tail
+
+    def test_unstarted_history_recovery_is_readonly_then_preserves_objects_on_retry(self):
+        report, result = self.unstarted_unknown()
+        added = self.append_history_nodes()
+        self.add_history_mention()
+        internal = self.server.add(block(2, ''), self.server.root)
+        self.server.nodes[self.server.root]['children'].insert(3, internal)
+        self.server.revision += 1
+        before = copy.deepcopy(self.server.nodes)
+        historical_order = list(before[self.server.root]['children'])
+        records = self.s.db.execute('SELECT * FROM records').fetchall()
+        start = len(self.server.calls)
+        inspected = reconcile(self.s,self.settings,result['publication_id'],base=self.server.base)
+        self.assertEqual(len(inspected['inspection']['history_additions']['added_nodes']), 3)
+        self.assertEqual(self.s.db.execute('SELECT * FROM records').fetchall(), records)
+        self.assertEqual(self.writes(start), [])
+        reconcile(self.s,self.settings,result['publication_id'],resolution='retry_authorized',
+                  reason='Synthetic exact unstarted-history inspection',base=self.server.base)
+        self.assertEqual(self.writes(start), [])
+        events = self.s.records('event')
+        self.assertTrue(any(e['data'].get('history_additions',{}).get('added_nodes') for e in events if e['data'].get('history_additions')))
+        self.assertCompleted(self.document_only(report,retry=True))
+        for bid, original in before.items():
+            if bid != self.server.root: self.assertEqual(self.server.nodes[bid], original)
+        self.assertEqual(self.server.nodes[self.server.root]['children'][-1], added[1])
+        preserved = copy.deepcopy(self.binding()['data']['preserved_tail'])
+        self.assertCompleted(self.document_only(self.report('2026-01-31')))
+        self.assertEqual(self.binding()['data']['preserved_tail'], preserved)
+        for bid, original in before.items():
+            if bid != self.server.root: self.assertEqual(self.server.nodes[bid], original)
+        self.assertEqual(self.server.nodes[self.server.root]['children'][-1], added[1])
+        self.assertEqual([bid for bid in self.server.nodes[self.server.root]['children'] if bid in historical_order], historical_order)
+        frozen = copy.deepcopy(self.server.nodes)
+        start = len(self.server.calls)
+        changed = self.report('2026-01-29', blocks=[block(2,'Modified history'),callout(2),callout(5)])
+        rewrite = self.document_only(changed)
+        self.assertEqual(rewrite['status'], 'needs_user')
+        self.assertEqual(self.writes(start), [])
+        self.assertEqual(self.server.nodes, frozen)
+
+    def test_unstarted_history_recovery_rejects_deleted_reordered_target_or_pending(self):
+        from work_assistant.timeline_tree import unstarted_history_recovery
+        from work_assistant.feishu import APIError
+        report, result = self.unstarted_unknown()
+        self.append_history_nodes()
+        binding = self.binding()['data']; publication=self.s.get(result['publication_id'])
+        actual=tree.from_snapshot(self.server.snapshot())
+        cases=[]
+        leading=copy.deepcopy(actual);leading['nodes'].insert(0,leading['nodes'].pop());cases.append((binding,publication,leading))
+        cross=copy.deepcopy(binding)
+        roots=cross['sections']['2026-01-29']['tree']
+        cross['sections']['2026-01-28']=dict(cross['sections']['2026-01-29'],tree=roots[3:])
+        cross['sections']['2026-01-29']['tree']=roots[:3]
+        cross['order']=['2026-01-29','2026-01-28']
+        between=copy.deepcopy(actual);between['nodes'].insert(3,between['nodes'].pop());cases.append((cross,publication,between))
+        deleted=copy.deepcopy(actual);del deleted['nodes'][1];cases.append((binding,publication,deleted))
+        moved=copy.deepcopy(actual);moved['nodes'][0],moved['nodes'][1]=moved['nodes'][1],moved['nodes'][0];cases.append((binding,publication,moved))
+        target=copy.deepcopy(actual);target['nodes'][-1]['block']=block(3,'2026-01-30');cases.append((binding,publication,target))
+        for field,value in [('operation',{'kind':'tree'}),('pending',{'op':'append'}),('rename_request',{'new_title':'Other'})]:
+            changed=copy.deepcopy(binding);changed[field]=value;cases.append((changed,publication,actual))
+        for field,value in [('pending',{'stage':'write'}),('steps',['write']),('block_ids',['partial'])]:
+            changed=copy.deepcopy(publication);changed['data'][field]=value;cases.append((binding,changed,actual))
+        changed=copy.deepcopy(binding);changed['sections']['2026-01-30']={};cases.append((changed,publication,actual))
+        for b,p,a in cases:
+            with self.assertRaises(APIError):unstarted_history_recovery(self.s,b,p,a)
+
+    def add_history_mention(self):
+        bid = next(bid for bid, b in self.server.nodes.items() if b['block_type'] == 12)
+        self.server.nodes[bid]['bullet']['elements'].append({'mention_doc': {
+            'obj_type': 22, 'title': 'Synthetic design', 'token': 'synthetic-doc',
+            'url': 'https://example.invalid/design', 'text_element_style': {'bold': True}}})
+        self.server.revision += 1
+        return bid
+
+    def test_history_mention_preserved_when_adding_new_day(self):
+        self.assertCompleted(self.document_only(self.report('2026-01-29')))
+        self.add_history_mention()
+        history = copy.deepcopy(self.server.nodes)
+        self.assertCompleted(self.document_only(self.report('2026-01-30')))
+        for bid, original in history.items():
+            if bid != self.server.root:
+                self.assertEqual(self.server.nodes[bid], original)
+
+    def test_target_mention_edit_still_protected(self):
+        self.assertCompleted(self.document_only(self.report('2026-01-29')))
+        self.add_history_mention()
+        original = copy.deepcopy(self.server.nodes)
+        start = len(self.server.calls)
+        changed = self.report('2026-01-29', blocks=[block(2, 'Changed'), callout(2), callout(5)])
+        result = self.document_only(changed)
+        self.assertNotEqual(result['status'], 'completed')
+        self.assertEqual(self.server.nodes, original)
+        self.assertEqual(self.writes(start), [])
+
+    def test_unknown_reconcile_reads_history_mention_without_remote_writes(self):
+        self.assertCompleted(self.document_only(self.report('2026-01-29')))
+        report = self.report('2026-01-30')
+        result = self.document_only(report, transport=self.ambiguous(lambda m,p: m=='POST' and p.endswith('/descendant')))
+        self.assertEqual(result['status'], 'outcome_unknown')
+        self.add_history_mention()
+        original = copy.deepcopy(self.server.nodes)
+        start = len(self.server.calls)
+        observed = reconcile(self.s, self.settings, result['publication_id'], base=self.server.base)
+        self.assertEqual(observed['inspection']['section']['phase'], 'complete')
+        self.assertEqual(self.server.nodes, original)
+        self.assertEqual(self.writes(start), [])
+
+    def test_other_inline_still_rejected_and_mentions_not_publishable(self):
+        from work_assistant.feishu import APIError, block_signature
+        value = block(2, 'Text')
+        value['text']['elements'].append({'equation': {'content': 'x'}})
+        with self.assertRaises(APIError): tree.signature(value)
+        value['text']['elements'][-1] = {'mention_doc': {'obj_type':22, 'title':'Design',
+            'token':'synthetic', 'url':'https://example.invalid', 'text_element_style':{}}}
+        with self.assertRaises(APIError): block_signature(value)
+        native = tree.signature(value)
+        changed = copy.deepcopy(value)
+        changed['text']['elements'][-1]['mention_doc']['token'] = 'edited'
+        self.assertNotEqual(native, tree.signature(changed))
+        with self.assertRaises(APIError):
+            tree.same_nodes([{'id':'b', 'block':changed}], [{'id':'b','block':value}], {'b'})
 
     def test_tree_create_update_same_leaf_and_day_card_then_zero_request_noop(self):
         original=self.report();self.assertEqual(preview(self.s,original['id'])['document']['format'],tree.FORMAT)

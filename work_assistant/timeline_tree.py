@@ -33,6 +33,9 @@ def shape(block):
 
 def align(old, target):
     """Keep compatible IDs; preserve explicitly adopted non-source children."""
+    if any(n.get('preserved') and any(not later.get('preserved') for later in old[i+1:])
+           for i,n in enumerate(old)):
+        raise NeedsUser('internal preserved historical nodes require explicit manual review before rewriting')
     eligible = [n for n in old if not n.get('preserved')]
     keys = [shape(n['block']) for n in eligible]; wanted = [shape(b) for b in target]
     for node in eligible:
@@ -356,3 +359,104 @@ def adopt_surgery(store,client,publication,payload,path):
     if leaves(nodes)!=source_leaves(tree.local_blocks(payload['document'])):
         raise NeedsUser('surgery acknowledgement native content differs from frozen report')
     return dict(actual,nodes=nodes,journal_hash=digest(journal),journal_path=str(source))
+
+
+def unstarted_history_recovery(store, binding, publication, actual):
+    """Classify narrowly bounded historical additions before an absent day's first write.
+
+    Returns a candidate acknowledgement; caller must not save it without an explicit
+    retry_authorized resolution. General observation and in-flight recovery stay strict.
+    """
+    data = publication['data']
+    report = store.get(data['report_id'])
+    period = report['data']['period']
+    if (not binding.get('tree_mode') or binding.get('operation') or binding.get('pending') or
+            binding.get('rename_request') or data.get('pending') or data.get('steps') != [] or
+            data.get('status') != 'outcome_unknown' or data.get('delivery_scope') != 'document_only' or
+            data.get('block_ids') != [] or not binding['sections'] or
+            period <= max(binding['sections']) or period in binding['sections'] or
+            binding.get('active_publication') not in (None, publication['id']) or
+            actual['title'] != binding['title']):
+        raise NeedsUser('history additions require an unstarted unknown document-only publication')
+    expected = tree.roots(binding)
+    known = {n['id'] for n in tree.walk(expected)}
+    added = []
+    def merge(found, wanted, parent_kind=None):
+        if len(found) < len(wanted):
+            raise NeedsUser('historical node deleted')
+        result = []
+        for observed, old in zip(found, wanted):
+            if observed['id'] != old['id'] or observed['block']['block_type'] != old['block']['block_type']:
+                raise NeedsUser('historical IDs moved or reordered')
+            node = copy.deepcopy(old)
+            # Keep previous acknowledged payloads for known historical nodes;
+            # this operation does not authorize replacing their user edits.
+            node['children'] = merge(observed.get('children', []), old.get('children', []), old['block']['block_type'])
+            result.append(node)
+        for observed in found[len(wanted):]:
+            kind = observed['block']['block_type']
+            if (observed['id'] in known or observed['id'].startswith('wa_tmp_') or
+                    observed.get('children') or observed.get('comments')):
+                raise NeedsUser('historical addition is not a new standalone leaf')
+            sig = tree.signature(observed['block'])
+            if parent_kind is None:
+                if kind != 2 or any(r.get('content', '').strip() or 'mention_doc' in r for r in sig['elements']):
+                    raise NeedsUser('only empty trailing root text can be preserved')
+            elif parent_kind != 19 or kind != 12:
+                raise NeedsUser('only trailing historical callout bullets can be preserved')
+            node = copy.deepcopy(observed)
+            node.update(owner='user-adopted', preserved=True)
+            added.append(copy.deepcopy(node))
+            result.append(node)
+        return result
+    # No new date heading may be hidden among otherwise historical content.
+    if any(n['block']['block_type'] == 3 and
+           ''.join(r.get('content','') for r in tree.signature(n['block'])['elements']).strip() == period
+           for n in tree.walk(actual['nodes'])):
+        raise NeedsUser('target date already exists remotely')
+    # Root additions may be empty text inside one historical day, bounded by
+    # known roots of that same day, or empty text after all historical roots.
+    root_days = {n['id']: day for day,section in binding['sections'].items() for n in section['tree']}
+    expected_roots = {n['id'] for n in expected}
+    internal_days = {}
+    root_additions = {}
+    for i,node in enumerate(actual['nodes']):
+        if node['id'] in expected_roots:
+            continue
+        sig = tree.signature(node['block'])
+        if (node['id'] in known or node['id'].startswith('wa_tmp_') or node.get('children') or
+                node.get('comments') or node['block']['block_type'] != 2 or
+                any(r.get('content','').strip() or 'mention_doc' in r for r in sig['elements'])):
+            raise NeedsUser('new root must be an empty standalone text block')
+        left = next((n['id'] for n in reversed(actual['nodes'][:i]) if n['id'] in expected_roots), None)
+        right = next((n['id'] for n in actual['nodes'][i+1:] if n['id'] in expected_roots), None)
+        if right is not None:
+            if left not in root_days or right not in root_days or root_days[left] != root_days[right]:
+                raise NeedsUser('internal empty root lacks two known anchors in the same historical day')
+            internal_days[node['id']] = root_days[left]
+        preserved = copy.deepcopy(node)
+        preserved.update(owner='user-adopted', preserved=True)
+        root_additions[node['id']] = preserved
+        added.append(copy.deepcopy(preserved))
+    merged_known = merge([n for n in actual['nodes'] if n['id'] in expected_roots], expected)
+    by_known = {n['id']: n for n in merged_known}
+    merged = [by_known[n['id']] if n['id'] in by_known else root_additions[n['id']] for n in actual['nodes']]
+    if not added:
+        raise NeedsUser('no explainable historical additions')
+    candidate = copy.deepcopy(binding)
+    for day,section in candidate['sections'].items():
+        section['tree'] = [copy.deepcopy(n) for n in merged
+                           if root_days.get(n['id'], internal_days.get(n['id'])) == day]
+        if day in internal_days.values():
+            section['block_ids'] = [n['id'] for n in section['tree']]
+            section['signatures'] = [tree.signature(n['block']) for n in section['tree']]
+    assigned = {n['id'] for section in candidate['sections'].values() for n in section['tree']}
+    candidate['preserved_tail'] = [copy.deepcopy(n) for n in merged if n['id'] not in assigned]
+    candidate['ack_revision'] = actual['revision']
+    candidate['document_tree'] = {'format':tree.FORMAT, 'document_id':binding['document_id'],
+                                 'revision':actual['revision'], 'nodes':copy.deepcopy(tree.roots(candidate))}
+    tree.same_nodes(actual['nodes'], tree.roots(candidate), ())
+    return candidate, {'publication_id':publication['id'], 'report_id':report['id'], 'absent_date':period,
+        'revision':actual['revision'], 'previous_ack_hash':digest(expected),
+        'observed_hash':digest(actual['nodes']), 'added_nodes':added,
+        'candidate_ack_hash':digest(tree.roots(candidate)), 'internal_root_dates':internal_days, 'writes_started':False}

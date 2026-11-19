@@ -117,9 +117,12 @@ wa example --output practice-project
 | 记录证据、更正结论、理解恢复状态 | [详细操作参考](docs/guide.md) |
 | 导入自己已有的日报收集器 | [导入日报](docs/guide.md#导入已有的本地日报)、[合成 bundle](examples/daily-bundle) |
 | 配置飞书、发文字或卡片 | [飞书接入](docs/guide.md#飞书预览和真实发布)、[消息命令](docs/messages.md) |
+| 给编码 Agent 安装飞书数字分身 skill | [work-assistant-feishu](skills/work-assistant-feishu/SKILL.md)（消息、固定文档日报、本人 @ 和私聊） |
 | 固定文档按日期累积、历史补录 | [Timeline 文档树](docs/timeline-trees.md) |
 | 本人 @ 助理、DS 快答与深度分析 | [可选入站](docs/inbound.md)（默认关闭，需额外依赖与租户验收） |
 | 出错或结果不明 | [排障](docs/troubleshooting.md)、[安全模型](SECURITY.md) |
+
+从当前源码安装 Work Assistant 后，将完整的 `skills/work-assistant-feishu/` 目录复制或链接到你的 Agent 技能目录，例如 `~/.agents/skills/work-assistant-feishu`。如果已有同名定制版，先比对本地绑定和操作要求。重新打开会话后，告诉 Agent 使用哪份私有 Work Assistant 配置。飞书身份、收件人和监听范围由该配置决定。
 
 ## 一起改进
 

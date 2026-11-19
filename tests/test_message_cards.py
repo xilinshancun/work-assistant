@@ -160,3 +160,53 @@ class CardTests(unittest.TestCase):
         with self.assertRaises(messages.MessageError):
             self.card_send(card)
         self.assertEqual(self.transport.calls, [])
+
+    def test_inspect_markdown_runs_preserves_content_and_never_resends(self):
+        card = copy.deepcopy(CARD)
+        card["elements"][0]["text"]["content"] = "**Synthetic result.**\nStill unverified."
+        projected = card_projection(card)
+        projected["elements"][0] = [{"tag": "text", "text": "Synthetic result."},
+                                     {"tag": "text", "text": "\nStill unverified."}]
+        current = dict(projected, title="pending readback")
+        calls = []
+
+        def request(method, path, body=None):
+            calls.append((method, path))
+            if method == "POST":
+                return {"message_id": "om_fixture", "chat_id": "oc_fixture"}
+            return {"items": [{"message_id": "om_fixture", "chat_id": "oc_fixture",
+                    "msg_type": "interactive", "sender": {"id": "cli_fixture",
+                    "id_type": "app_id", "sender_type": "app"},
+                    "body": {"content": json.dumps(current)}}]}
+
+        client = type("Client", (), {"app_id": lambda _: "cli_fixture", "authenticate": lambda _: None})()
+        client.request = request
+        source = self.root / "markdown-card.json"
+        source.write_text(json.dumps(card))
+        with patch.object(messages, "make_client", return_value=client):
+            sent = messages.send(self.store, self.settings, "markdown-runs", "chat_id", "oc_fixture", None,
+                                 confirm=True, card_file=source)
+            self.assertEqual(sent["status"], "verification_pending")
+            current = copy.deepcopy(projected)
+            count = len(calls)
+            verified = messages.inspect(self.store, self.settings, sent["action_id"])
+            self.assertEqual(verified["status"], "completed")
+            self.assertTrue(all(verified["checks"].values()))
+            self.assertEqual(calls[count:], [("GET", "/im/v1/messages/om_fixture")])
+            self.assertEqual(verified["message_id"], sent["message_id"])
+            self.assertEqual(verified["text_sha256"], sent["text_sha256"])
+        self.assertEqual(sum(method == "POST" for method, _ in calls), 1)
+
+        bad_rows = [projected["elements"][0][::-1], projected["elements"][0][:1],
+                    [{"tag": "text", "text": "Synthetic result.\nStill unverified. "}],
+                    [{"tag": "text", "text": "Synthetic result.\nStill unverified.", "extra": True}],
+                    [{"tag": "link", "text": "Synthetic result.\nStill unverified."}],
+                    [{"tag": "text", "text": None}], {"tag": "text", "text": "invalid row"}, []]
+        for bad_row in bad_rows:
+            changed = copy.deepcopy(projected)
+            changed["elements"][0] = bad_row
+            with self.subTest(row=bad_row):
+                self.assertFalse(matches_card_projection(card, changed))
+        moved = copy.deepcopy(projected)
+        moved["elements"][2].insert(0, moved["elements"][0].pop())
+        self.assertFalse(matches_card_projection(card, moved))

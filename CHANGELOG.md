@@ -4,6 +4,18 @@ This file records reviewable source changes. A version heading is not evidence o
 a PyPI upload, Git tag or GitHub release. Only the explicitly dispatched release
 workflow can publish; normal test CI never uploads to a registry.
 
+## Unreleased
+
+- Publish the Feishu agent skill with message, daily delivery and owner intake
+  instructions. Its offline helper prepares a card for an acknowledged report
+  and fixed document using the operator's own bindings.
+- Verify Markdown card readback across split text runs. Recover an original send
+  after a recorded pre-send authentication failure with an explicit reason.
+  The Lark CLI also inherits standard network proxy settings.
+- Render imported table rows with column labels. Preserve historical document
+  mentions and support inspecting and adopting bounded manual additions before
+  retrying an interrupted, unstarted daily section.
+
 ## [0.1.0a1] - 2026-10-30
 
 Alpha baseline; interfaces, local state formats and provider compatibility may
