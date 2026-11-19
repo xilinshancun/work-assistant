@@ -420,6 +420,15 @@ class LarkCLITests(Base):
             self.assertIsInstance(make_client(default), Feishu)
             self.assertEqual(make_client(default).destination(), LarkCLI(self.settings).destination())
 
+    def test_isolated_environment_keeps_standard_proxy_only(self):
+        from work_assistant.lark_cli import isolated_environment
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:9", "no_proxy": "localhost"}):
+            env = isolated_environment(dict(self.settings, cli_config_dir=str(self.directory)))
+        self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:9")
+        self.assertEqual(env["no_proxy"], "localhost")
+        self.assertNotIn("LARKSUITE_CLI_AUTH_PROXY", env)
+        self.assertNotIn("FEISHU_APP_SECRET", env)
+
     def test_full_environment_runner_does_not_reintroduce_parent(self):
         with patch.dict(os.environ, {"WA_SYNTHETIC_AMBIENT": "old"}):
             result = execute([sys.executable, "-c", "import os; print(os.environ.get('WA_SYNTHETIC_AMBIENT','absent'))"],

@@ -50,6 +50,10 @@ def isolated_environment(settings):
     keys = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP",
             "SYSTEMROOT", "SystemRoot", "WINDIR", "USERPROFILE", "LOCALAPPDATA",
             "APPDATA", "LANG", "TZ", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"}
+    # Standard network proxies only route traffic; some networks reset direct Feishu
+    # token requests. CLI-specific auth/credential proxies stay excluded.
+    keys |= {"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
+             "https_proxy", "http_proxy", "all_proxy", "no_proxy"}
     env = {k: v for k, v in os.environ.items() if k in keys or k.startswith("LC_")}
     env.update(LARKSUITE_CLI_CONFIG_DIR=settings["cli_config_dir"],
                LARKSUITE_CLI_NO_UPDATE_NOTIFIER="1", LARKSUITE_CLI_NO_SKILLS_NOTIFIER="1")

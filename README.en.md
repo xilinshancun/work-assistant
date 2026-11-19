@@ -117,9 +117,12 @@ See [capabilities](docs/capabilities.md), the [security model](SECURITY.md), and
 | Evidence, corrections, recovery | [Detailed reference](docs/guide.md) (Chinese) |
 | Import an existing report pipeline | [Import reference](docs/guide.md#导入已有的本地日报), [synthetic bundle](examples/daily-bundle) |
 | Send Feishu text or display cards | [Setup](docs/guide.md#飞书预览和真实发布), [message commands](docs/messages.md) |
+| Use Feishu messaging, daily documents and owner mentions from an agent | [work-assistant-feishu skill](skills/work-assistant-feishu/SKILL.md) |
 | Maintain a dated document | [Timeline trees](docs/timeline-trees.md) |
 | Owner-only mentions and deep analysis | [Optional inbound](docs/inbound.md) (disabled by default; additional dependencies and tenant checks) |
 | Troubleshoot | [Troubleshooting](docs/troubleshooting.md), [security model](SECURITY.md) |
+
+After installing Work Assistant from this checkout, copy or link the entire `skills/work-assistant-feishu/` directory into your agent's skills directory, such as `~/.agents/skills/work-assistant-feishu`. Compare any existing customized copy before replacing it. Start a new session and point the agent to your private Work Assistant configuration.
 
 ## Contribute
 

@@ -24,7 +24,7 @@ def callout_signature(value):
 def signature(block):
     if type(block) is dict and type(block.get('block_type')) is int and block['block_type'] == 19:
         return {'block_type': 19, 'callout': callout_signature(block.get('callout'))}
-    return block_signature(block)
+    return block_signature(block, observe_mentions=True)
 
 
 def local_blocks(document):
@@ -75,7 +75,7 @@ def count(nodes):
 
 
 def roots(binding):
-    return [node for day in binding['order'] for node in binding['sections'][day]['tree']]
+    return [node for day in binding['order'] for node in binding['sections'][day]['tree']] + binding.get('preserved_tail', [])
 
 
 def payload(node):

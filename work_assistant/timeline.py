@@ -620,14 +620,23 @@ def reconcile_timeline(store,settings,ident,resolution=None,reason=None,remote_i
         document_id=remote_ids.get('document_id',binding['document_id'])
         if 'document_id' in remote_ids and (type(document_id) is not str or not document_id):raise ValueError('document_id must be a nonempty string')
         if binding['document_id'] and document_id!=binding['document_id']:raise ValueError('timeline document cannot be silently rebound')
-        inspected={};view=None
+        inspected={};view=None;history_candidate=None;history_audit=None
         if document_id:
             if binding.get('operation'):
                 view=operation_view(client,binding)
                 inspected['section']={'phase':view['phase'],'revision':view['revision'],'new_ids':view['new_ids'],
                                       'content_hash':digest(view.get('nodes',view.get('signatures')))}
             else:
-                view=binding_observe(client,dict(binding,document_id=document_id))
+                try:
+                    view=binding_observe(client,dict(binding,document_id=document_id))
+                except NeedsUser:
+                    if initial['kind'] != 'publication' or not publication or resolution not in (None, 'retry_authorized'):
+                        raise
+                    from .timeline_tree import unstarted_history_recovery
+                    from .document_tree import observe as observe_tree
+                    view=observe_tree(client,document_id)
+                    history_candidate,history_audit=unstarted_history_recovery(store,binding,publication,view)
+                    inspected['history_additions']=history_audit
                 rename=binding.get('rename_request')
                 if view['title'] not in ([rename['old_title'],rename['new_title']] if rename else [binding['title']]):
                     raise NeedsUser('unexpected timeline title; refusing recovery')
@@ -641,6 +650,10 @@ def reconcile_timeline(store,settings,ident,resolution=None,reason=None,remote_i
         if not resolution:
             return {'binding_record_id':binding_record['id'],'binding':binding,'publication':publication['data'] if publication else None,
                     'inspection':inspected,'note':'GET only; no writes, resolution, retry or agent resume performed'}
+        if history_candidate is not None:
+            binding_record=copy.deepcopy(binding_record)
+            binding=history_candidate
+            binding_record['data']=binding
         engine=document_engine(store,client,binding_record)
         pending=binding.get('pending') or {}
         binding_unresolved = binding['status'] != 'completed' or bool(pending) or bool(binding.get('operation')) or bool(binding.get('rename_request'))
@@ -722,6 +735,7 @@ def reconcile_timeline(store,settings,ident,resolution=None,reason=None,remote_i
             if section_event:store.record('event',section_event,project_id=binding['project_id'])
             for resource in resources:store.db.execute('DELETE FROM locks WHERE resource=?',(resource,))
             store.record('event',{'action':'timeline_resolution','binding_id':binding['binding_id'],'publication_id':pub_id,
-                'resolution':resolution,'reason':reason,'remote_ids':remote_ids,'document_complete':doc_complete},project_id=binding['project_id'])
+                'resolution':resolution,'reason':reason,'remote_ids':remote_ids,'document_complete':doc_complete,
+                'history_additions':history_audit},project_id=binding['project_id'])
         return {'binding_record_id':binding_record['id'],'binding':binding,'publication':publication['data'] if publication else None,
                 'inspection':inspected,'note':'Explicit local resolution only; no remote writes or retry performed'}

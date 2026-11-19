@@ -269,12 +269,21 @@ def _readback(store, record, client, persist=True):
 
 def send(store, settings, request_id, receive_id_type, receive_id, text_file, confirm=False,
          transport=http, base=BASE, process=None, card_file=None, identity="bot",
-         reply_to_message_id=None, reply_in_thread=False):
+         reply_to_message_id=None, reply_in_thread=False, retry_preflight=False, reason=None):
     """One explicit user request. Reentry never performs a second POST."""
     _settings(settings)
     owner = _identity(settings, identity)
     if type(confirm) is not bool:
         raise MessageError("confirm must be an explicit boolean; model content is not permission")
+    if type(retry_preflight) is not bool:
+        raise MessageError("retry-preflight must be an explicit boolean")
+    if retry_preflight:
+        if (type(reason) is not str or not reason.strip() or len(reason) > 2000
+                or any(ord(c) < 32 and c not in "\n\r\t" for c in reason)):
+            raise MessageError("retry-preflight requires a nonempty reason (max 2000 characters)")
+        outbound_guard(reason)
+    elif reason is not None:
+        raise MessageError("send reason requires retry-preflight")
     _request(request_id)
     if type(receive_id_type) is not str or receive_id_type not in {"chat_id", "open_id"}:
         raise MessageError("receive-id-type must be chat_id or open_id")
@@ -310,6 +319,29 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
                        or record["data"].get("reply_in_thread", False) != reply_in_thread
                        or (identity == "user" and record["data"].get("expected_sender_user_open_id") != owner)):
             raise MessageError("request-id already belongs to different target/content; do not replace it")
+        retrying = retry_preflight and record and record["data"]["status"] != "completed"
+        if retry_preflight and not record:
+            raise MessageError("retry-preflight requires the original failed action")
+        if retrying:
+            data = record["data"]
+            if (data.get("status") != "failed" or data.get("verification_status") != "not_sent"
+                    or data.get("error") != "authentication_failed_before_send; no message request started"
+                    or data.get("message_id") is not None or data.get("send_acknowledged") is not False
+                    or data.get("expected_sender_app_id") is not None
+                    or data.get("pending") or data.get("resolution") or data.get("update_parent")
+                    or reply_to_message_id is not None or reply_in_thread
+                    or data.get("uuid") != str(uuid.uuid5(uuid.NAMESPACE_URL, "wa.outgoing-message:" + request_id))
+                    or data.get("receive_id") != receive_id or data.get("receive_id_type") != receive_id_type):
+                raise MessageError("retry-preflight requires an unchanged send that failed authentication before sending")
+            source = Path(data["source_artifact"])
+            if source != store.root / "messages" / (ident + ".txt") or source.resolve() != source:
+                raise MessageError("private source path changed")
+            with os.fdopen(os.open(str(source), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)), "rb") as saved:
+                info = os.fstat(saved.fileno())
+                if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                    raise MessageError("private source must be a mode-0600 regular file")
+                if saved.read(MAX_TEXT_BYTES + 1) != raw:
+                    raise MessageError("private source is missing or modified")
         if not confirm:
             return {"status": "dry_run", "action_id": ident, "request_id": request_id,
                     "receive_id_type": receive_id_type, "receive_id": receive_id,
@@ -318,27 +350,34 @@ def send(store, settings, request_id, receive_id_type, receive_id, text_file, co
                     "identity": identity, "expected_sender_user_open_id": owner,
                     "reply_to_message_id": reply_to_message_id, "reply_in_thread": reply_in_thread,
                     "requested_placement": ("thread" if reply_in_thread else "main") if reply_to_message_id else None}
-        if record:
+        if record and not retrying:
             return _receipt(_recover(store, record), no_op=True)
         for prior in store.records(KIND):
             previous = prior["data"]
             if (previous["target_sha256"] == target_hash and previous["text_sha256"] == text_hash
                     and previous.get("identity", "bot") == identity
                     and (identity == "bot" or previous.get("expected_sender_user_open_id") == owner)
-                    and previous["status"] in UNRESOLVED):
+                    and previous["status"] in UNRESOLVED and prior["id"] != ident):
                 raise MessageError("identical message has an unresolved action " + prior["id"] + "; inspect it, do not replace request-id")
-        artifact = _persist_text(store, ident, raw)
-        with store.transaction():
-            record = store.record(KIND, {"schema": "wa.message.v1", "request_id": request_id,
-                "identity": identity, "expected_sender_user_open_id": owner,
-                "reply_to_message_id": reply_to_message_id, "reply_in_thread": reply_in_thread,
-                "requested_placement": ("thread" if reply_in_thread else "main") if reply_to_message_id else None,
-                "receive_id_type": receive_id_type, "receive_id": receive_id, "target_sha256": target_hash,
-                "text_sha256": text_hash, "source_artifact": artifact, "msg_type": msg_type,
-                "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, "wa.outgoing-message:" + request_id)),
-                "status": "preparing", "verification_status": "not_sent", "expected_sender_app_id": None,
-                "message_id": None, "chat_id": receive_id if receive_id_type == "chat_id" else None,
-                "send_acknowledged": False}, ident=ident)
+        if retrying:
+            with store.transaction():
+                store.record("message_preflight_retry", {"action_id": ident, "reason": reason,
+                             "requested_at": now(), "prior_state": record["data"]})
+                store.update_record(ident, dict(record["data"], status="preparing", verification_status="not_sent"))
+            record = store.get(ident)
+        else:
+            artifact = _persist_text(store, ident, raw)
+            with store.transaction():
+                record = store.record(KIND, {"schema": "wa.message.v1", "request_id": request_id,
+                    "identity": identity, "expected_sender_user_open_id": owner,
+                    "reply_to_message_id": reply_to_message_id, "reply_in_thread": reply_in_thread,
+                    "requested_placement": ("thread" if reply_in_thread else "main") if reply_to_message_id else None,
+                    "receive_id_type": receive_id_type, "receive_id": receive_id, "target_sha256": target_hash,
+                    "text_sha256": text_hash, "source_artifact": artifact, "msg_type": msg_type,
+                    "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, "wa.outgoing-message:" + request_id)),
+                    "status": "preparing", "verification_status": "not_sent", "expected_sender_app_id": None,
+                    "message_id": None, "chat_id": receive_id if receive_id_type == "chat_id" else None,
+                    "send_acknowledged": False}, ident=ident)
         try:
             client = _client(settings, identity, transport, base, process)
             app_id = _id(client.app_id(), "application ID", "cli_")
@@ -649,6 +688,8 @@ def parser():
     command.add_argument("--identity", choices=["bot", "user"], default="bot", help="Explicit user OAuth messages only; default bot")
     command.add_argument("--reply-to-message-id", "--reply-to", dest="reply_to_message_id", help="Known source message to quote/reply to; bot and chat_id only")
     command.add_argument("--reply-in-thread", action="store_true", help="Reply in the source topic; requires --reply-to")
+    command.add_argument("--retry-preflight", action="store_true", help="Explicitly recover only authentication failure before send; original action retained")
+    command.add_argument("--reason", help="Required audit reason with --retry-preflight")
     files = command.add_mutually_exclusive_group(required=True)
     files.add_argument("--text-file")
     files.add_argument("--card-file", help="Display-only interactive card JSON; no callbacks or forms")
@@ -688,7 +729,8 @@ def main(argv=None):
                     if args.command == "send":
                         result = send(store, conf["publisher"], args.request_id, args.receive_id_type, args.receive_id,
                                       args.text_file, confirm=args.confirm, card_file=args.card_file, identity=args.identity,
-                                      reply_to_message_id=args.reply_to_message_id, reply_in_thread=args.reply_in_thread)
+                                      reply_to_message_id=args.reply_to_message_id, reply_in_thread=args.reply_in_thread,
+                                      retry_preflight=args.retry_preflight, reason=args.reason)
                     elif args.command == "resolve":
                         result = resolve(store, args.action_id, absent=args.absent, reason=args.reason, confirm=args.confirm)
                     elif args.command == "update-card":

@@ -29,13 +29,25 @@ def block_text(block):
     return text
 
 
-def block_signature(block):
+def block_signature(block, *, observe_mentions=False):
     """Compare rendered text/styles while accepting server-supplied defaults."""
     text = block_text(block)
     if block.get("children") or block.get("comment_ids"):
         raise APIError("document has nested blocks or comments; refusing replacement")
     runs = []
     for element in text["elements"]:
+        if observe_mentions and type(element) is dict and set(element) == {"mention_doc"}:
+            mention = element["mention_doc"]
+            fields = {"obj_type", "title", "token", "url", "text_element_style"}
+            if (type(mention) is not dict or set(mention) != fields or
+                    type(mention["obj_type"]) is not int or mention["obj_type"] != 22 or
+                    any(type(mention[key]) is not str or not mention[key] for key in ("title", "token", "url")) or
+                    type(mention["text_element_style"]) is not dict):
+                raise APIError("unsupported native document mention")
+            # Observation only: retain the complete native object, including styles.
+            # Local publication payloads still use the strict default above.
+            runs.append({"mention_doc": json.loads(json.dumps(mention))})
+            continue
         if type(element) is not dict or set(element) != {"text_run"} or type(element["text_run"]) is not dict:
             raise APIError("unsupported native inline element; refusing replacement")
         run = element["text_run"]
@@ -50,7 +62,7 @@ def block_signature(block):
         for key in ("background_color", "text_color"):
             if type(style.get(key)) is int and style[key] == 0:
                 del style[key]
-        if runs and runs[-1]["style"] == style:
+        if runs and "mention_doc" not in runs[-1] and runs[-1]["style"] == style:
             runs[-1]["content"] += run["content"]
         else:
             runs.append({"content": run["content"], "style": style})

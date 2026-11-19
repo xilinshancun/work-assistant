@@ -93,6 +93,44 @@ class DailyImportTests(Base):
     def files(self, record):
         return {p.name: p.read_text(encoding="utf-8") for p in Path(record["data"]["path"]).iterdir()}
 
+    def test_skill_prepares_frozen_card_only_for_the_acknowledged_report(self):
+        report = self.load()
+        data = report["data"]
+        document_id = "synthetic-document"
+        state = {"document_id": document_id, "status": "completed",
+                 "sections": {PERIOD: {"report_id": report["id"], "report_hash": data["hash"]}}}
+        binding = self.s.record("doc_binding", state, project_id=self.p["id"])
+        config = self.root / "config.json"
+        config.write_text(dumps({"state_dir": str(self.s.root)}))
+        repo = Path(__file__).resolve().parents[1]
+        script = repo / "skills/work-assistant-feishu/scripts/prepare_daily_card.py"
+
+        def prepare(expected_document=document_id):
+            return subprocess.run([sys.executable, str(script), "--config", str(config),
+                                   "--binding-id", binding["id"], "--document-id", expected_document,
+                                   report["id"]], capture_output=True, text=True, cwd=self.root,
+                                  env=dict(os.environ, PYTHONPATH=str(repo)))
+
+        self.assertNotEqual(prepare("different-document").returncode, 0)
+        self.s.update_record(binding["id"], dict(state, pending={"op": "update"}))
+        self.assertNotEqual(prepare().returncode, 0)
+        self.assertFalse((self.s.root / "prepared-daily-cards").exists())
+        self.s.update_record(binding["id"], state)
+        records = self.s.records()
+        result = prepare()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads(result.stdout)
+        card_file = Path(manifest["card_file"])
+        self.assertEqual(digest(card_file.read_bytes()), manifest["card_sha256"])
+        card = json.loads(card_file.read_text())
+        buttons = [b["url"] for e in card["elements"] if e["tag"] == "action" for b in e["actions"]]
+        self.assertEqual(buttons, ["https://www.feishu.cn/docx/" + document_id])
+        self.assertEqual(prepare().stdout, result.stdout)
+        card_file.write_text("changed")
+        self.assertNotEqual(prepare().returncode, 0)
+        self.assertEqual(card_file.read_text(), "changed")
+        self.assertEqual(self.s.records(), records)
+
     def document_text(self, record):
         blocks = preview(self.s, record["id"])["document"]["children"]
         return "\n".join(daily_import.block_text(b) for b in blocks)
@@ -471,7 +509,8 @@ class DailyImportTests(Base):
         fragment = "<table><tr><td><p>10</p><p>20</p></td><td><div>30</div><div>40</div></td></tr></table>"
         self.write_bundle(HTML.replace("<h2>详细结果</h2>", fragment))
         text = self.document_text(self.load())
-        self.assertIn("| 10; 20 | 30; 40", text)
+        self.assertIn("10; 20\n30; 40", text)
+        self.assertNotIn("|", text)
         self.assertNotIn("1020", text)
         self.assertNotIn("3040", text)
 
@@ -731,8 +770,27 @@ class DailyImportTests(Base):
         report = self.load()
         body = json.loads(self.files(report)["evidence.json"])["body"]
         self.assertIn("样本计数\n| A | B\n| 10 | 20", body)
-        self.assertIn("| A | B\n| 10 | 20", self.document_text(report))
+        self.assertIn("A · B\nA：10\nB：20", self.document_text(report))
         self.assertNotIn("1020", body)
+
+    def test_table_rows_become_native_bullets_with_headers_and_links(self):
+        table = ('<table><tr><th>实验</th><th>结果</th><th>下一步</th></tr>'
+                 '<tr><td><strong>短程</strong></td><td>通过</td>'
+                 '<td><a href="https://example.invalid/report">补全程</a></td></tr>'
+                 '<tr><td>长程</td><td>未开始</td><td>排查</td></tr></table>'
+                 '<table><tr><td>另一组</td><td>尚未开始</td></tr></table>')
+        self.write_bundle(HTML.replace("<h2>详细结果</h2>", table))
+        blocks = preview(self.s, self.load()["id"])["document"]["children"]
+        rows = [b for b in blocks if daily_import.block_text(b).startswith("实验：")]
+        self.assertEqual([daily_import.block_text(b) for b in rows],
+                         ["实验：短程\n结果：通过\n下一步：补全程", "实验：长程\n结果：未开始\n下一步：排查"])
+        self.assertTrue(all(b["block_type"] == 12 for b in rows))
+        elements = rows[0]["bullet"]["elements"]
+        runs = {e["text_run"]["content"]: e["text_run"] for e in elements}
+        self.assertTrue(runs["短程"]["text_element_style"]["bold"])
+        self.assertEqual(unquote(runs["补全程"]["text_element_style"]["link"]["url"]), "https://example.invalid/report")
+        self.assertNotIn("|", "".join(daily_import.block_text(b) for b in rows))
+        self.assertIn("另一组\n尚未开始", [daily_import.block_text(b) for b in blocks])
 
     def test_optional_hidden_paragraph_and_list_end_tags_keep_visible_qualifications(self):
         examples = ["<p hidden>不应显示<p>限定：尚未独立复现。",
