@@ -155,8 +155,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("skip-existing: 'false'", publish)
         self.assertIn('7245906fb61fa33a13554f9d5fb856fe61758086', publish)
         self.assertIn('test "$GITHUB_RUN_ATTEMPT" = 1', publish)
-        self.assertIn("python: ['3.9', '3.12']", text)
-        self.assertIn('os: [ubuntu-latest, macos-14]', text)
+        validate = text.split('\n  validate:\n', 1)[1].split('\n  publish:\n', 1)[0]
+        for runner, version in (('ubuntu-24.04', '3.9'), ('ubuntu-latest', '3.12'),
+                                ('macos-15-intel', '3.9'), ('macos-15', '3.12')):
+            with self.subTest(runner=runner, version=version):
+                self.assertIn(f"- {{os: {runner}, python: '{version}'}}", validate)
 
     def test_both_download_verifiers_reject_tampering(self):
         text = (ROOT / '.github/workflows/release.yml').read_text(encoding='utf-8')
