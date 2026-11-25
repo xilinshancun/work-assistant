@@ -41,6 +41,9 @@ SOURCE_FILES = {'README.md', 'LICENSE', 'SECURITY.md', 'pyproject.toml', 'MANIFE
                 'skills/work-assistant-feishu/SKILL.md', 'skills/work-assistant-feishu/scripts/prepare_daily_card.py',
                 'skills/work-assistant-feishu/references/messages.md', 'skills/work-assistant-feishu/references/daily.md',
                 'skills/work-assistant-feishu/references/inbound.md',
+                'AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'skills/technical-writing/SKILL.md',
+                'skills/technical-writing/references/document-design.md',
+                'skills/technical-writing/references/presentation.md', 'skills/technical-writing/references/reader-test.md',
                 'examples/daily-bundle/daily/2026-01-15.html',
                 'examples/daily-bundle/evidence/daily-2026-01-15.json'}
 

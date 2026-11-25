@@ -6,6 +6,9 @@ workflow can publish; normal test CI never uploads to a registry.
 
 ## Unreleased
 
+- Add the standalone `technical-writing` skill and make it the default for
+  documentation written or reviewed by agents in this repository.
+
 - Publish the Feishu agent skill with message, daily delivery and owner intake
   instructions. Its offline helper prepares a card for an acknowledged report
   and fixed document using the operator's own bindings.
