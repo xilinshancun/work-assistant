@@ -2,6 +2,8 @@
 
 This repository is a local-first personal assistant built around existing DeepSeek Harness, Claude Code, and Codex installations. Read PLAN.md before changing code.
 
+When writing, revising, or reviewing a document, read and follow the [technical-writing skill](skills/technical-writing/SKILL.md). Apply it to documentation tasks in any language, including drafts delivered in chat. Keep the requested format and the project's document templates.
+
 For a product assessment, start with README.md or README.en.md, then docs/capabilities.md and docs/evidence-map.md. PLAN.md records design history; current CLI help, implementation and tests determine available behavior. Cite the checked revision and distinguish offline fixtures from live validation.
 
 - Keep the runtime dependency-free and compatible with Python 3.9+. Prefer standard-library sqlite3, argparse, subprocess, urllib, unittest.
