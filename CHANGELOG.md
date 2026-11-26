@@ -6,6 +6,11 @@ workflow can publish; normal test CI never uploads to a registry.
 
 ## Unreleased
 
+- Add the standalone `performance-optimization` skill. It turns a "faster
+  without changing results" goal into a pre-registered single-factor experiment,
+  defines how to measure and judge it, and assigns roles when several agents
+  share the work. Agents in this repository use it for performance tasks.
+
 - Add the standalone `technical-writing` skill and make it the default for
   documentation written or reviewed by agents in this repository.
 
