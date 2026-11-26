@@ -19,6 +19,8 @@ include skills/work-assistant-feishu/scripts/prepare_daily_card.py
 include CLAUDE.md GEMINI.md
 include skills/technical-writing/SKILL.md
 include skills/technical-writing/references/document-design.md skills/technical-writing/references/presentation.md skills/technical-writing/references/reader-test.md
+include skills/performance-optimization/SKILL.md
+include skills/performance-optimization/references/method.md skills/performance-optimization/references/measurement.md skills/performance-optimization/references/agents.md skills/performance-optimization/references/sources.md
 include work_assistant/resources/first_project/README.md work_assistant/resources/first_project/count_records.py work_assistant/resources/first_project/records.txt
 recursive-include .github *.yml *.md
 recursive-include tests test_*.py

@@ -44,6 +44,9 @@ SOURCE_FILES = {'README.md', 'LICENSE', 'SECURITY.md', 'pyproject.toml', 'MANIFE
                 'AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'skills/technical-writing/SKILL.md',
                 'skills/technical-writing/references/document-design.md',
                 'skills/technical-writing/references/presentation.md', 'skills/technical-writing/references/reader-test.md',
+                'skills/performance-optimization/SKILL.md', 'skills/performance-optimization/references/method.md',
+                'skills/performance-optimization/references/measurement.md',
+                'skills/performance-optimization/references/agents.md', 'skills/performance-optimization/references/sources.md',
                 'examples/daily-bundle/daily/2026-01-15.html',
                 'examples/daily-bundle/evidence/daily-2026-01-15.json'}
 
